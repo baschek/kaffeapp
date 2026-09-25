@@ -1,0 +1,13 @@
+{
+  "name": "Kaffee-Bestand",
+  "short_name": "Kaffee",
+  "description": "Kaffeechargen, Portionen und 96 Tiefkühlgläser verwalten.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f5f0e8",
+  "theme_color": "#211710",
+  "lang": "de",
+  "icons": [
+    { "src": "favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
