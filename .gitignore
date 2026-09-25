@@ -3,5 +3,6 @@ dist/
 .env
 .env.local
 coverage/
+graphify-out/
 *.log
 *.tsbuildinfo

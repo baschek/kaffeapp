@@ -34,3 +34,10 @@ Nach einem Push auf `main` oder `master` baut die enthaltene GitHub-Action die A
 ## Datenprinzip
 
 `kaffee-bestand.json` enthält Einstellungen und ein unveränderliches Ereignisjournal. Der aktuelle Bestand wird daraus abgeleitet. Fehler werden durch eine begründete Gegenbuchung korrigiert; es gibt keine harten Löschungen. Zusätzlich entstehen vor Änderungen höchstens einmal täglich datierte Drive-Sicherungen.
+
+## Verteilungsregeln
+
+- Kategorie A nutzt vorrangig M-Gläser, behält aber immer mindestens eine S-Portion derselben Charge.
+- Daily Driver nutzt vorrangig L-Gläser, behält aber immer mindestens ein M-Glas derselben Charge.
+- Kleine Restmengen werden als eigene Teilfüllung dokumentiert, statt unzugeordnet außerhalb der Gläser zu bleiben.
+- `Daily · gemahlen · M → S` ist für häufig genutzten gemahlenen Kaffee gedacht, der zunächst in M gelagert und beim Öffnen portionsweise nach S umgefüllt wird.

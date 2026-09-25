@@ -3,6 +3,7 @@ import type { AppSettings, CategoryDefinition, InventoryDocument, JarSize, JarSt
 export const BUILT_IN_CATEGORIES: AppSettings['categories'] = [
   { id: 'premium-whole', name: 'Hochwertig / wichtig · ganze Bohne', ruleProfile: 'A', builtIn: true },
   { id: 'daily-driver', name: 'Daily Driver', ruleProfile: 'B', builtIn: true },
+  { id: 'daily-ground-m-to-s', name: 'Daily · gemahlen · M → S', ruleProfile: 'A', builtIn: true },
   { id: 'important-ground', name: 'Wichtig · gemahlen', ruleProfile: 'DIRECT_S', builtIn: true },
   { id: 'less-important-ground', name: 'Weniger wichtig · gemahlen', ruleProfile: 'MANUAL', builtIn: true },
 ]

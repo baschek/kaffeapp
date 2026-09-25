@@ -27,6 +27,19 @@ export function planAllocation(input: PlanInput): AllocationPlan {
     const remaining = fullPortions % mCapacity
     for (let i = 0; i < fullM; i++) requested.push({ size: 'M', grams: round(mCapacity * portionGrams) })
     for (let i = 0; i < remaining; i++) requested.push({ size: 'S', grams: portionGrams })
+
+    // A-Mengen sollen immer eine sofort nutzbare S-Portion behalten. Bei einer
+    // exakt in M passenden Charge wird daher ein M bewusst in S-Portionen zerlegt.
+    if (!requested.some(item => item.size === 'S') && fullM > 0) {
+      requested.pop()
+      for (let i = 0; i < mCapacity; i++) requested.push({ size: 'S', grams: portionGrams })
+    }
+
+    // Auch eine kleine Differenz bleibt einer Charge zugeordnet und nicht lose.
+    if (restGrams > 0.001) {
+      requested.push({ size: 'S', grams: restGrams })
+      unallocatedGrams = 0
+    }
   } else if (profile === 'B') {
     const lGrams = round(portionCapacity('L', input.brewMethod) * portionGrams)
     const mGrams = round(portionCapacity('M', input.brewMethod) * portionGrams)
@@ -36,9 +49,20 @@ export function planAllocation(input: PlanInput): AllocationPlan {
       const fill = Math.min(mGrams, remaining)
       requested.push({ size: 'M', grams: round(fill) }); remaining = round(remaining - fill)
     }
+    // Ein Daily Driver braucht mindestens ein kleineres M-Glas. Passt eine
+    // Charge exakt in L, ersetzt ein L drei passende M-Gläser.
+    if (!requested.some(item => item.size === 'M') && requested.some(item => item.size === 'L')) {
+      requested.pop()
+      const mCount = portionCapacity('L', input.brewMethod) / portionCapacity('M', input.brewMethod)
+      for (let i = 0; i < mCount; i++) requested.push({ size: 'M', grams: mGrams })
+    }
     unallocatedGrams = 0
   } else if (profile === 'DIRECT_S') {
     for (let i = 0; i < fullPortions; i++) requested.push({ size: 'S', grams: portionGrams })
+    if (restGrams > 0.001) {
+      requested.push({ size: 'S', grams: restGrams })
+      unallocatedGrams = 0
+    }
   } else {
     unallocatedGrams = input.grams
   }
