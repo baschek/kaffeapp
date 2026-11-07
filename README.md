@@ -41,3 +41,7 @@ Nach einem Push auf `main` oder `master` baut die enthaltene GitHub-Action die A
 - Daily Driver nutzt vorrangig L-Gläser, behält aber immer mindestens ein M-Glas derselben Charge.
 - Kleine Restmengen werden als eigene Teilfüllung dokumentiert, statt unzugeordnet außerhalb der Gläser zu bleiben.
 - `Daily · gemahlen · M → S` ist für häufig genutzten gemahlenen Kaffee gedacht, der zunächst in M gelagert und beim Öffnen portionsweise nach S umgefüllt wird.
+
+## Native Android-App
+
+Im Ordner [`android/`](android/) liegt die native App (Kotlin, Compose, Room). Sie synchronisiert das Journal mit TESS auf dem Pi statt mit Google Drive; Kopplung, Signaturschlüssel und Releases beschreibt [`android/README.md`](android/README.md). Die Regeln werden über gemeinsame Golden-Fälle (`src/golden/golden.test.ts`) mit dieser Web-App und TESS gleich gehalten.
