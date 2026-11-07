@@ -65,6 +65,10 @@ jobs:
           fi
           if git status --porcelain -- android/app/schemas | grep -q '^??'; then
             echo "::warning::New Room schema files were generated but are not committed (android/app/schemas)."
+            # Print them so they can be copied into the repository from the log.
+            git ls-files --others --exclude-standard -- android/app/schemas | while read -r f; do
+              echo "----- BEGIN $f"; cat "$f"; echo "----- END $f"
+            done
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
