@@ -1,3 +1,4 @@
+/// <reference types="node" />
 // Erzeugt Golden-Fälle für die Nachbauten der Domänenlogik (TESS/Python, Android/Kotlin).
 // Aufruf: GOLDEN_OUT=<datei> npx vitest run src/golden/golden.test.ts
 // Die TypeScript-Logik in src/domain ist die Referenz; die Fälle sind synthetisch (keine echten Daten).
