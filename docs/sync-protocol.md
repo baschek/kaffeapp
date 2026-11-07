@@ -18,7 +18,9 @@ pull new events. The stock is always derived locally with the shared rules (gold
 | `GET /kaffee/v1/events?since=<seq>&limit=<1..500, default 500>` | `{ "events": [ {"seq": n, "origin": "app"\|"web"\|"claude"\|"import"\|"drive", "event": {...}} ], "next_since": M, "has_more": bool }` ascending by seq |
 | `POST /kaffee/v1/push` body `{ "events": [event, ...] }` (max 200 events, max 2 MB) | `{ "results": [ {"event_id", "status": "applied"\|"duplicate"\|"rejected", "reason": "<German text, rejected only>"} ], "seq": N }` |
 
-Push rules: events are processed in the given order, each one exactly like a booking by Claude: it is stored only if it
+Push rules: an event must have an id (≤100 chars), a known `type`, `recordedAt`/`effectiveAt` with a time zone and at
+most 5 minutes in the future, `resourceIds` (list of strings) and `data` (object); otherwise it is rejected with a
+reason. Events are processed in the given order, each one exactly like a booking by Claude: it is stored only if it
 creates no new derivation warning on the server's current journal (`coffee.append`). `duplicate` = the id is already
 stored (idempotent replay; the stored version wins). A rejected event is NOT stored; the client removes it from its
 outbox, drops it from its local journal and shows the reason ("Buchung abgelehnt: …"); events of the same push that
@@ -61,14 +63,23 @@ periodic (Android WorkManager ~15 min, network required; website on focus), manu
   Ceremonies expire after 5 min and are single use. JSON shapes follow WebAuthn Level 3 `toJSON()` (base64url fields),
   so the browser side can use `PublicKeyCredential.parseCreationOptionsFromJSON` / `parseRequestOptionsFromJSON` with a
   small fallback.
-- CORS: only for the allowed origins on `/kaffee/v1/*` (incl. preflight), `Authorization` and `Content-Type` headers,
-  no cookies.
+- CORS: only for the allowed origins on `/kaffee/v1/*` (incl. preflight): `Access-Control-Allow-Origin: <origin>`,
+  `Access-Control-Allow-Methods: GET, POST, OPTIONS`, `Access-Control-Allow-Headers: Authorization, Content-Type`,
+  `Vary: Origin`, never `Access-Control-Allow-Credentials` (the website calls with `credentials: "omit"`). The neutral
+  404 carries these headers too when the request comes from an allowed origin, so the website can read it and treat
+  an authenticated 401/404 as "session expired, log in again" (and a network error as "Pi unreachable").
+- A passkey for `rp.id` `baschek.github.io` can be used by every page under `https://baschek.github.io/` (e.g. the
+  old GymApp PWA). That is acceptable because all those pages are Jonathan's own code, but no third-party code may
+  ever be published there.
 
 ## Errors and fingerprinting
 
 Like gym amendment B: every unauthenticated or invalid request to `/kaffee/v1/*` gets the server's generic 404 (same
-body as an unknown path), with two deliberate exceptions that must exist publicly for a passkey login:
-`webauthn/login/options` and `webauthn/login/verify` (verify still answers a failed login with the neutral 404).
+body as an unknown path), with deliberate exceptions that must exist publicly for the website:
+`webauthn/login/options` and `webauthn/login/verify` (verify still answers a failed login with the neutral 404), and
+the CORS preflight (`OPTIONS`) for an allowed origin. These reveal that the coffee API exists; the data stays behind a
+credential. The Android pair endpoint exists only while a code is open, `webauthn/register/options` answers only with
+a valid code (both neutral 404 otherwise).
 Both are rate limited; floods trigger the same temporary global lockout as gym. 429 only for an authenticated client
 over its rate limit. Details only in the server log, never secrets.
 
