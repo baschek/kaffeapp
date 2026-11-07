@@ -74,6 +74,7 @@ jobs:
             android/core/build/reports
             android/app/build/reports
             android/app/build/outputs/apk/debug/*.apk
+            android/app/schemas
           if-no-files-found: ignore
           retention-days: 7
 
