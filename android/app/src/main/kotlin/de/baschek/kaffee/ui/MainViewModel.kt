@@ -33,6 +33,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val syncStatus = container.syncManager.status
     val paired: StateFlow<Boolean> = container.syncManager.paired
     val pendingCount: StateFlow<Int> = container.repository.pendingCount.stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+    val appearance: StateFlow<de.baschek.kaffee.ui.theme.Appearance> = container.appearance.state
     val notices: StateFlow<List<String>> = container.repository.notices.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     private val _message = MutableStateFlow<String?>(null)
@@ -56,6 +57,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             onDone(ok)
         }
     }
+
+    fun setAppearance(change: (de.baschek.kaffee.ui.theme.Appearance) -> de.baschek.kaffee.ui.theme.Appearance) = container.appearance.update(change)
 
     fun say(text: String) { _message.value = text }
 

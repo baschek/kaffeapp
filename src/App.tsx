@@ -8,9 +8,15 @@ import { validateDocument } from './storage/local'
 import { InventoryRepository } from './storage/repository'
 import { readMode, SessionExpiredError, TessRepository, writeMode, type Mode, type RejectedNotice, type TessEnvelope } from './storage/tess'
 import { passkeysSupported } from './storage/webauthn'
+import { AppearanceSettings } from './ui/Appearance'
+import { CoffeeView } from './ui/Coffee'
+import { EVENT_LABEL, Empty, NavIcon, PageHeading, type NavId } from './ui/common'
+import { Dashboard } from './ui/Dashboard'
+import { JarDetail } from './ui/JarDetail'
+import { JarMatrix } from './ui/Jars'
 import type {
   AllocationPlan, BeanState, BrewMethod, CoffeeLot, CoffeePackage, FlexibleDate, InventoryEvent,
-  JarSize, JarState, LocalEnvelope, RuleProfile,
+  LocalEnvelope, RuleProfile,
 } from './types'
 
 declare global {
@@ -25,12 +31,13 @@ type View = 'dashboard' | 'jars' | 'coffee' | 'history' | 'settings'
 const repository = new InventoryRepository()
 const tessRepository = new TessRepository()
 const initialMode = (): Mode | null => readMode() ?? (tessRepository.serverUrl ? 'tess' : null)
-const statusLabel: Record<JarState['status'], string> = { free: 'Frei', planned: 'Geplant', frozen: 'Tiefgekühlt', active: 'Aktiv', cleaning: 'Zu reinigen' }
 
 export default function App() {
   const [envelope, setEnvelope] = useState<LocalEnvelope | null>(null)
   const [view, setView] = useState<View>('dashboard')
   const [dialog, setDialog] = useState<'package' | 'allocate' | 'restore' | null>(null)
+  const [allocatePackage, setAllocatePackage] = useState<string>()
+  const [toast, setToast] = useState<{ text: string; undo?: InventoryEvent[] }>()
   const [selectedJar, setSelectedJar] = useState<string>()
   const [selectedLot, setSelectedLot] = useState<string>()
   const [query, setQuery] = useState('')
@@ -61,6 +68,11 @@ export default function App() {
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
   }, [mode])
+  useEffect(() => {
+    if (!toast) return
+    const timer = window.setTimeout(() => setToast(undefined), 7000)
+    return () => window.clearTimeout(timer)
+  }, [toast])
   const state = useMemo(() => envelope ? reduceInventory(envelope.document) : null, [envelope])
   const settings = useMemo(() => envelope ? effectiveSettings(envelope.document) : null, [envelope])
 
@@ -117,8 +129,10 @@ export default function App() {
 
   const switchMode = (next: Mode) => { writeMode(next); setConflictIds([]); setSetupOpen(false); setMode(next) }
 
-  const append = async (events: InventoryEvent[]) => {
+  /** Bucht Ereignisse. Mit `label` erscheint danach eine Meldung mit „Rückgängig“ (bucht dieselben Ereignisse als Gegenbuchung zurück). */
+  const append = async (events: InventoryEvent[], label?: string) => {
     if (!envelope) return
+    if (label) setToast({ text: label, undo: events })
     if (tessMode) {
       const next = await tessRepository.append(events)
       setEnvelope(next); setMessage(`${next.pendingEventIds.length} Änderung${next.pendingEventIds.length === 1 ? '' : 'en'} wartet/warten auf TESS`)
@@ -152,7 +166,7 @@ export default function App() {
 
   const openSearch = () => {
     const id = query.trim().toUpperCase()
-    if (state?.jars[id]) { setSelectedJar(id); setView('jars'); setQuery('') }
+    if (state?.jars[id]) { setSelectedJar(id); setQuery('') }
     else setMessage(`Glas „${id}“ wurde nicht gefunden.`)
   }
 
@@ -169,145 +183,94 @@ export default function App() {
   const rejected = tessMode ? (envelope as TessEnvelope).rejected || [] : []
   const lastSync = tessMode && (envelope as TessEnvelope).lastSyncAt ? new Date((envelope as TessEnvelope).lastSyncAt!).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' }) : null
 
-  const nav: Array<[View, string, string]> = [
-    ['dashboard', 'Übersicht', '⌂'], ['jars', 'Gläser', '▦'], ['coffee', 'Kaffees', '◉'], ['history', 'Verlauf', '↗'], ['settings', 'Daten', '⋯'],
+  const nav: Array<[View, string]> = [
+    ['dashboard', 'Übersicht'], ['jars', 'Gläser'], ['coffee', 'Kaffees'], ['history', 'Verlauf'], ['settings', 'Einstellungen'],
   ]
+  const navIcon = (id: View) => NavIcon[(id === 'dashboard' ? 'dashboard' : id) as NavId]
+  const synced = tessMode ? signedIn : repository.drive.connected
+  const syncButton = tessMode
+    ? <button className="sync-button" onClick={signedIn ? () => syncTess() : loginTess} disabled={syncing}>
+      {syncing ? 'Bitte warten …' : signedIn ? 'Jetzt synchronisieren' : 'Mit Passkey anmelden'}
+    </button>
+    : <button className="sync-button" onClick={repository.drive.connected ? () => sync() : connect} disabled={syncing}>
+      {syncing ? 'Bitte warten …' : repository.drive.connected ? 'Jetzt synchronisieren' : 'Mit Google Drive verbinden'}
+    </button>
+  const go = (next: View) => { setView(next); setSelectedJar(undefined) }
+  const undo = (events: InventoryEvent[]) => {
+    setToast(undefined)
+    void append([...events].reverse().map(event => createEvent('CORRECTION', { targetEventId: event.id }, event.resourceIds, { reason: 'Rückgängig', parentEventIds: [event.id] })))
+  }
 
   return <div className="app-shell">
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark">K</span><div><strong>Kaffee-Bestand</strong><small>96 Gläser · eine Geschichte</small></div></div>
-      <nav>{nav.map(([id, label, icon]) => <button key={id} className={view === id ? 'active' : ''} onClick={() => setView(id)}><span>{icon}</span>{label}</button>)}</nav>
+      <div className="brand"><span className="brand-mark">K</span><div><strong>Kaffee-Bestand</strong><small>Gefrierfach-Inventar</small></div></div>
+      <nav aria-label="Hauptnavigation">{nav.map(([id, label]) => <button key={id} className={view === id ? 'active' : ''} aria-current={view === id ? 'page' : undefined} onClick={() => go(id)}>{navIcon(id)}{label}</button>)}</nav>
       <div className="side-status">
-        <span className={`sync-dot ${(tessMode ? signedIn : repository.drive.connected) ? 'online' : ''}`} />
+        <span className={`sync-dot ${synced ? 'online' : ''}`} />
         <div><strong>{tessMode ? (signedIn ? 'TESS verbunden' : 'TESS · nicht angemeldet') : repository.drive.connected ? 'Notfall: Drive verbunden' : 'Notfall: nur lokal'}</strong><small>{envelope.pendingEventIds.length} ausstehend{lastSync ? ` · ${lastSync}` : ''}</small></div>
       </div>
     </aside>
 
     <main>
       <header className="topbar">
-        <div className="mobile-brand">Kaffee-Bestand</div>
+        <div className="mobile-top">
+          <span className="mobile-brand">Kaffee-Bestand</span>
+          <span className="mobile-sync"><i className={`sync-dot ${synced ? 'online' : ''}`} />{synced ? 'Verbunden' : 'Lokal'}</span>
+          <button className="gear" onClick={() => go('settings')} aria-label="Einstellungen">{NavIcon.settings}</button>
+        </div>
         <form className="jar-search" onSubmit={event => { event.preventDefault(); openSearch() }}>
-          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Glas suchen, z. B. S15" aria-label="Glasnummer suchen" />
+          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Glas suchen, z. B. S15" aria-label="Glasnummer suchen" autoComplete="off" />
           <button type="submit">Suchen</button>
         </form>
-        {tessMode
-          ? <button className="sync-button" onClick={signedIn ? () => syncTess() : loginTess} disabled={syncing}>
-            {syncing ? 'Bitte warten …' : signedIn ? 'Jetzt synchronisieren' : 'Mit Passkey anmelden'}
-          </button>
-          : <button className="sync-button" onClick={repository.drive.connected ? () => sync() : connect} disabled={syncing}>
-            {syncing ? 'Bitte warten …' : repository.drive.connected ? 'Jetzt synchronisieren' : 'Mit Google Drive verbinden'}
-          </button>}
       </header>
 
-      <div className="status-strip" role="status"><span>{message}</span>{!navigator.onLine && <b>Offline</b>}{!tessMode && <b>Notfallmodus Google Drive</b>}{conflictIds.length > 0 && <button onClick={() => setView('history')}>Konflikte ansehen</button>}{rejected.length > 0 && <button onClick={() => setView('settings')}>Abgelehnte Buchungen ansehen</button>}</div>
+      <div className="status-strip" role="status"><span className="status-text">{message}</span>{!navigator.onLine && <b>Offline</b>}{!tessMode && <b>Notfallmodus Google Drive</b>}{conflictIds.length > 0 && <button className="link" onClick={() => go('history')}>Konflikte ansehen</button>}{rejected.length > 0 && <button className="link" onClick={() => go('settings')}>Abgelehnte Buchungen ansehen</button>}{syncButton}</div>
 
-      {view === 'dashboard' && <Dashboard state={state} settings={settings} onAdd={() => setDialog('package')} onAllocate={() => setDialog('allocate')} onJar={(id: string) => { setSelectedJar(id); setView('jars') }} onView={setView} />}
+      {view === 'dashboard' && <Dashboard state={state} onAdd={() => setDialog('package')} onAllocate={() => { setAllocatePackage(undefined); setDialog('allocate') }} onJar={setSelectedJar} onJars={() => go('jars')} />}
       {view === 'jars' && <JarMatrix state={state} selected={selectedJar} onSelect={setSelectedJar} />}
-      {view === 'coffee' && <CoffeeView state={state} settings={settings} selected={selectedLot} onSelect={setSelectedLot} onAllocate={() => setDialog('allocate')} />}
+      {view === 'coffee' && <CoffeeView state={state} categories={settings.categories} selected={selectedLot} onSelect={setSelectedLot} onJar={setSelectedJar} onAllocate={packageId => { setAllocatePackage(packageId); setDialog('allocate') }} />}
       {view === 'history' && <HistoryView events={envelope.document.events} corrected={state.correctedEventIds} conflicts={conflictIds} onCorrect={event => {
         const reason = window.prompt('Warum ist diese Buchung fehlerhaft?')?.trim()
         if (reason) void append([createEvent('CORRECTION', { targetEventId: event.id }, event.resourceIds, { reason, parentEventIds: [event.id] })])
       }} />}
-      {view === 'settings' && <ConnectionPanel mode={mode} serverUrl={tessRepository.serverUrl} signedIn={signedIn} lastSync={lastSync} pending={envelope.pendingEventIds.length} rejected={rejected}
-        onLogin={loginTess} onLogout={logoutTess} onAddPasskey={() => setSetupOpen(true)} onDismiss={async () => setEnvelope(await tessRepository.dismissRejected())}
-        onSwitch={(next: Mode) => {
-          if (next === 'drive' && !window.confirm('Notfallmodus: Buchungen gehen dann in die Google-Drive-Datei statt zu TESS. Der Pi übernimmt sie bei der nächsten nächtlichen Sicherung. Nur nutzen, wenn der Pi nicht erreichbar ist. Wechseln?')) return
-          switchMode(next)
-        }} />}
-      {view === 'settings' && <DataView envelope={envelope} settings={settings} state={state} connected={repository.drive.connected} tessMode={tessMode} onBackup={async () => {
-        try { await repository.manualBackup(envelope); setMessage('Manuelle Sicherung in Google Drive erstellt') } catch (error) { setMessage(error instanceof Error ? error.message : 'Sicherung fehlgeschlagen') }
-      }} onRestore={() => setDialog('restore')} onAppend={append} />}
+      {view === 'settings' && <section className="page">
+        <PageHeading eyebrow="Darstellung" title="Einstellungen" lead="Farben, Glas-Stil und Helligkeit. Die Auswahl gilt sofort überall." />
+        <AppearanceSettings />
+        <PageHeading small eyebrow="Server & Sicherung" title="Verbindung und Daten" />
+        <ConnectionPanel mode={mode} serverUrl={tessRepository.serverUrl} signedIn={signedIn} lastSync={lastSync} pending={envelope.pendingEventIds.length} rejected={rejected}
+          onLogin={loginTess} onLogout={logoutTess} onAddPasskey={() => setSetupOpen(true)} onDismiss={async () => setEnvelope(await tessRepository.dismissRejected())}
+          onSwitch={(next: Mode) => {
+            if (next === 'drive' && !window.confirm('Notfallmodus: Buchungen gehen dann in die Google-Drive-Datei statt zu TESS. Der Pi übernimmt sie bei der nächsten nächtlichen Sicherung. Nur nutzen, wenn der Pi nicht erreichbar ist. Wechseln?')) return
+            switchMode(next)
+          }} />
+        <DataView envelope={envelope} settings={settings} state={state} connected={repository.drive.connected} tessMode={tessMode} onBackup={async () => {
+          try { await repository.manualBackup(envelope); setMessage('Manuelle Sicherung in Google Drive erstellt') } catch (error) { setMessage(error instanceof Error ? error.message : 'Sicherung fehlgeschlagen') }
+        }} onRestore={() => setDialog('restore')} onAppend={append} />
+      </section>}
     </main>
 
-    <nav className="mobile-nav">{nav.slice(0, 4).map(([id, label, icon]) => <button key={id} className={view === id ? 'active' : ''} onClick={() => setView(id)}><span>{icon}</span>{label}</button>)}</nav>
+    <nav className="mobile-nav" aria-label="Hauptnavigation">{nav.slice(0, 4).map(([id, label]) => <button key={id} className={view === id ? 'active' : ''} aria-current={view === id ? 'page' : undefined} onClick={() => go(id)}>{navIcon(id)}{label}</button>)}</nav>
     {dialog === 'package' && <AddPackageDialog onClose={() => setDialog(null)} onSave={events => { void append(events); setDialog(null) }} />}
-    {dialog === 'allocate' && <AllocateDialog state={state} settings={settings} onClose={() => setDialog(null)} onSave={events => { void append(events); setDialog(null); setView('jars') }} />}
+    {dialog === 'allocate' && <AllocateDialog state={state} settings={settings} initialPackageId={allocatePackage} onClose={() => setDialog(null)} onSave={events => { void append(events); setDialog(null); go('jars') }} />}
     {dialog === 'restore' && <RestoreDialog onClose={() => setDialog(null)} onRestore={async doc => { const next = await repository.replace(envelope, doc); setEnvelope(next); setDialog(null); setMessage('Wiederherstellung vorgemerkt – bitte mit Drive synchronisieren') }} />}
-    {selectedJar && <JarDetail jar={state.jars[selectedJar]} state={state} settings={settings} events={envelope.document.events} onClose={() => setSelectedJar(undefined)} onAppend={append} />}
+    {selectedJar && state.jars[selectedJar] && <JarDetail key={selectedJar} jar={state.jars[selectedJar]} state={state} events={envelope.document.events} onClose={() => setSelectedJar(undefined)} onAppend={(events, label) => { void append(events, label) }} />}
+    {toast && <div className="toast" role="status"><span>{toast.text}</span>{toast.undo && <button onClick={() => undo(toast.undo!)}>Rückgängig</button>}</div>}
   </div>
 }
 
-function Dashboard({ state, settings, onAdd, onAllocate, onJar, onView }: any) {
-  const jars = Object.values(state.jars) as JarState[]
-  const counts = (size: JarSize) => jars.filter(j => j.size === size && j.status === 'free').length
-  const cleaning = jars.filter(j => j.status === 'cleaning').length
-  const frozen = jars.filter(j => j.status === 'frozen').length
-  const active = jars.filter(j => j.status === 'active').length
-  const packages = Object.values(state.packages) as CoffeePackage[]
-  const lots = Object.values(state.lots) as CoffeeLot[]
-  return <section className="page dashboard">
-    <div className="page-heading"><div><p className="eyebrow">Bestand heute</p><h1>Alles an seinem Platz.</h1></div><div className="actions"><button className="secondary" onClick={onAllocate}>Kaffee öffnen & aufteilen</button><button className="primary" onClick={onAdd}>Neue Packung</button></div></div>
-    <div className="metric-grid">
-      <Metric label="Tiefgekühlte Gläser" value={frozen} detail={`${active} aktiv aufgetaut`} tone="coffee" />
-      <Metric label="Freie Gläser" value={counts('S') + counts('M') + counts('L')} detail={`${counts('S')} S · ${counts('M')} M · ${counts('L')} L`} tone="ice" />
-      <Metric label="Ungeöffnete Packungen" value={packages.filter(p => !p.openedAt && !p.archived).length} detail={`${packages.filter(p => p.location === 'frozen' && !p.openedAt).length} komplett eingefroren`} tone="gold" />
-      <Metric label="Zu reinigen" value={cleaning} detail={cleaning ? 'Noch nicht wieder verfügbar' : 'Alle Gläser einsatzbereit'} tone="slate" />
-    </div>
-    <div className="dashboard-grid">
-      <article className="panel inventory-panel"><div className="panel-head"><div><p className="eyebrow">Kaffees</p><h2>Verfügbare Portionen</h2></div><button className="text-button" onClick={() => onView('coffee')}>Alle ansehen →</button></div>
-        {lots.length === 0 ? <Empty title="Noch keine portionierte Charge" text="Erfasse zuerst eine Packung und teile sie anschließend auf." action="Packung hinzufügen" onAction={onAdd} /> :
-          <div className="coffee-list">{lots.filter(l => !l.archived).slice(0, 6).map(lot => {
-            const grams = jars.filter(j => j.lotId === lot.id).reduce((sum, jar) => sum + jar.grams, 0) + lot.unallocatedGrams
-            const portion = lot.baseGrams + lot.allowanceGrams
-            return <button key={lot.id} className="coffee-row" onClick={() => onView('coffee')}><span className={`method-badge ${lot.brewMethod}`}>{lot.brewMethod === 'espresso' ? 'E' : 'F'}</span><span><strong>{lot.name}</strong><small>{settings.categories.find((c: any) => c.id === lot.categoryId)?.name || 'Eigene Kategorie'}</small></span><b>{formatPortions(grams, portion)}</b></button>
-          })}</div>}
-      </article>
-      <article className="panel jar-preview"><div className="panel-head"><div><p className="eyebrow">Gefrierfach</p><h2>Glasstatus</h2></div><button className="text-button" onClick={() => onView('jars')}>Matrix öffnen →</button></div>
-        <div className="mini-jars">{jars.filter(j => j.status !== 'free').slice(0, 24).map(jar => <button key={jar.id} className={`mini-jar ${jar.status}`} onClick={() => onJar(jar.id)}><b>{jar.id}</b><small>{Math.round(jar.grams)} g</small></button>)}</div>
-        {!jars.some(j => j.status !== 'free') && <Empty title="Alle Gläser sind frei" text="Sobald du eine Charge bestätigst, erscheint sie hier." />}
-      </article>
-    </div>
-    {state.overrides.length > 0 && <div className="notice warning"><b>{state.overrides.length} dokumentierte Regelabweichung{state.overrides.length === 1 ? '' : 'en'}</b><span>Im Verlauf bleiben Begründung und betroffene Charge dauerhaft sichtbar.</span></div>}
-  </section>
-}
-
-function Metric({ label, value, detail, tone }: { label: string; value: number; detail: string; tone: string }) {
-  return <article className={`metric ${tone}`}><span>{label}</span><strong>{value}</strong><small>{detail}</small></article>
-}
-
-function Empty({ title, text, action, onAction }: { title: string; text: string; action?: string; onAction?: () => void }) {
-  return <div className="empty"><span>○</span><strong>{title}</strong><p>{text}</p>{action && <button className="text-button" onClick={onAction}>{action} →</button>}</div>
-}
-
-function JarMatrix({ state, selected, onSelect }: { state: ReturnType<typeof reduceInventory>; selected?: string; onSelect: (id: string) => void }) {
-  return <section className="page"><div className="page-heading"><div><p className="eyebrow">S01 bis L12</p><h1>Alle 96 Gläser</h1><p className="lead">Ein Klick zeigt Inhalt, Herkunft und die nächsten möglichen Aktionen.</p></div><div className="legend"><span><i className="free" />Frei</span><span><i className="frozen" />Tiefgekühlt</span><span><i className="active" />Aktiv</span><span><i className="cleaning" />Reinigung</span></div></div>
-    {(['S', 'M', 'L'] as JarSize[]).map(size => <article className="panel jar-group" key={size}><div className="jar-group-title"><div className="size-token">{size}</div><div><h2>{size === 'S' ? 'Einzelportionen' : size === 'M' ? 'Mehrportionen' : 'Großgläser'}</h2><small>{size === 'S' ? '53 ml · 48 Gläser' : size === 'M' ? '212 ml · 36 Gläser' : '555 ml · 12 Gläser'}</small></div></div><div className={`jar-grid size-${size.toLowerCase()}`}>{Object.values(state.jars).filter(j => j.size === size).map(jar => <button key={jar.id} aria-label={`${jar.id}, ${statusLabel[jar.status]}`} className={`jar-tile ${jar.status} ${selected === jar.id ? 'selected' : ''}`} onClick={() => onSelect(jar.id)}><strong>{jar.id}</strong>{jar.grams > 0 && <small>{jar.grams.toLocaleString('de-DE')} g</small>}</button>)}</div></article>)}
-  </section>
-}
-
-function CoffeeView({ state, settings, selected, onSelect, onAllocate }: any) {
-  const packages = Object.values(state.packages) as CoffeePackage[]
-  const lots = Object.values(state.lots) as CoffeeLot[]
-  const lot = selected ? state.lots[selected] : lots[0]
-  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Packungen & Chargen</p><h1>Der Weg jeder Bohne</h1></div><button className="primary" onClick={onAllocate}>Packung öffnen</button></div>
-    <div className="coffee-layout"><div className="panel coffee-index"><h2>Ungeöffnete Packungen</h2>{packages.filter(p => !p.openedAt && !p.archived).map(pkg => <div className="package-card" key={pkg.id}><span className="package-icon">▰</span><div><strong>{pkg.name}</strong><small>{pkg.availableGrams.toLocaleString('de-DE')} g · {pkg.location === 'frozen' ? 'komplett tiefgekühlt' : 'Vorrat'}</small></div></div>)}{!packages.some(p => !p.openedAt && !p.archived) && <p className="muted">Keine ungeöffneten Packungen.</p>}
-      <h2>Teilchargen</h2>{lots.filter(l => !l.archived).map(item => <button key={item.id} className={`lot-button ${lot?.id === item.id ? 'active' : ''}`} onClick={() => onSelect(item.id)}><span className={`method-badge ${item.brewMethod}`}>{item.brewMethod === 'espresso' ? 'E' : 'F'}</span><span><strong>{item.name}</strong><small>{settings.categories.find((c: any) => c.id === item.categoryId)?.name}</small></span></button>)}</div>
-      <div className="panel lineage">{lot ? <LotLineage lot={lot} state={state} settings={settings} /> : <Empty title="Noch keine Teilcharge" text="Öffne eine Packung und bestätige ihre Glasaufteilung." />}</div></div>
-  </section>
-}
-
-function LotLineage({ lot, state, settings }: { lot: CoffeeLot; state: ReturnType<typeof reduceInventory>; settings: any }) {
-  const pkg = state.packages[lot.packageId]
-  const jars = Object.values(state.jars).filter(j => j.lotId === lot.id)
-  const total = jars.reduce((sum, jar) => sum + jar.grams, 0) + lot.unallocatedGrams
-  return <><div className="lineage-head"><div><p className="eyebrow">Herkunftsbaum</p><h2>{lot.name}</h2><p>{lot.brewMethod === 'espresso' ? 'Espresso' : 'Filter'} · {lot.beanState === 'whole' ? 'ganze Bohne' : 'gemahlen'} · {formatPortions(total, lot.baseGrams + lot.allowanceGrams)}</p></div><span className="weight-pill">{total.toLocaleString('de-DE')} g</span></div>
-    <div className="tree"><div className="tree-node root"><small>Ursprungspackung</small><strong>{pkg?.name}</strong><span>{pkg?.nominalGrams.toLocaleString('de-DE')} g Nenngewicht</span></div><div className="tree-line" /><div className="tree-node"><small>Teilcharge</small><strong>{settings.categories.find((c: any) => c.id === lot.categoryId)?.name || 'Eigene Kategorie'}</strong><span>{lot.baseGrams + lot.allowanceGrams} g je Portion</span></div><div className="tree-line" /><div className="tree-children">{jars.map(jar => <div className={`tree-node jar ${jar.status}`} key={jar.id}><small>{statusLabel[jar.status]}</small><strong>{jar.id}</strong><span>{jar.grams.toLocaleString('de-DE')} g</span></div>)}{lot.unallocatedGrams > 0 && <div className="tree-node remainder"><small>Nicht eingelagert</small><strong>Restmenge</strong><span>{lot.unallocatedGrams.toLocaleString('de-DE')} g</span></div>}</div></div>
-    <div className="lot-facts"><div><span>Auftauvorgänge</span><b>{Math.max(0, ...jars.map(j => j.thawCount))}</b></div><div><span>Wiedereinfrierungen</span><b>{Math.max(0, ...jars.map(j => j.refreezeCount))}</b></div><div><span>Regelprofil</span><b>{lot.ruleProfile}</b></div></div></>
-}
-
 function HistoryView({ events, corrected, conflicts, onCorrect }: { events: InventoryEvent[]; corrected: Set<string>; conflicts: string[]; onCorrect: (event: InventoryEvent) => void }) {
-  const labels: Record<string, string> = { PACKAGE_CREATED: 'Packung angelegt', PACKAGE_FROZEN: 'Packung eingefroren', PACKAGE_OPENED: 'Packung geöffnet', LOT_CREATED: 'Teilcharge erstellt', LOT_GROUND: 'Vorratsmahlung', ALLOCATION_COMMITTED: 'Gläser befüllt', JAR_OPENED: 'Glas geöffnet', TRANSFER_COMMITTED: 'Kaffee umgefüllt', CONSUMED: 'Kaffee verbraucht', JAR_CLEANED: 'Glas gereinigt', CATEGORY_CHANGED: 'Kategorie geändert', CATEGORY_DEFINED: 'Kategorie angelegt', SETTINGS_CHANGED: 'Einstellung geändert', ARCHIVED: 'Archiviert', RULE_OVERRIDE: 'Regelabweichung', MEASUREMENT_ADJUSTMENT: 'Messkorrektur', CORRECTION: 'Fehler-Gegenbuchung' }
-  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Unveränderliches Journal</p><h1>Vollständiger Verlauf</h1><p className="lead">Fehler verschwinden nicht: Eine Gegenbuchung hebt ihre Bestandswirkung nachvollziehbar auf.</p></div></div><article className="panel timeline">{[...events].sort((a, b) => b.effectiveAt.localeCompare(a.effectiveAt)).map(event => <div className={`timeline-row ${corrected.has(event.id) ? 'corrected' : ''} ${conflicts.includes(event.id) ? 'conflict' : ''}`} key={event.id}><div className="timeline-mark" /><div><div className="timeline-title"><strong>{labels[event.type] || event.type}</strong><time>{new Date(event.effectiveAt).toLocaleString('de-DE')}</time></div><p>{event.resourceIds.join(' · ') || 'Bestand'}{event.reason ? ` — ${event.reason}` : ''}</p>{event.warnings?.map(w => <span className="event-warning" key={w}>{w}</span>)}<small>{event.id}</small></div>{event.type !== 'CORRECTION' && !corrected.has(event.id) && <button className="icon-button" onClick={() => onCorrect(event)}>Fehler buchen</button>}</div>)}{events.length === 0 && <Empty title="Noch keine Ereignisse" text="Die erste erfasste Packung beginnt dein Journal." />}</article></section>
+  const labels = EVENT_LABEL
+  return <section className="page"><PageHeading eyebrow="Unveränderliches Journal" title="Verlauf" lead="Fehler verschwinden nicht: Eine Gegenbuchung hebt ihre Bestandswirkung nachvollziehbar auf." /><article className="panel timeline">{[...events].sort((a, b) => b.effectiveAt.localeCompare(a.effectiveAt)).map(event => <div className={`timeline-row ${corrected.has(event.id) ? 'corrected' : ''} ${conflicts.includes(event.id) ? 'conflict' : ''}`} key={event.id}><div className="timeline-mark" /><div><div className="timeline-title"><strong>{labels[event.type] || event.type}</strong><time>{new Date(event.effectiveAt).toLocaleString('de-DE')}</time></div><p>{event.resourceIds.join(' · ') || 'Bestand'}{event.reason ? ` — ${event.reason}` : ''}</p>{event.warnings?.map(w => <span className="event-warning" key={w}>{w}</span>)}<small>{event.id}</small></div>{event.type !== 'CORRECTION' && !corrected.has(event.id) && <button className="icon-button" onClick={() => onCorrect(event)}>Fehler buchen</button>}</div>)}{events.length === 0 && <Empty title="Noch keine Ereignisse" text="Die erste erfasste Packung beginnt dein Journal." />}</article></section>
 }
 
 function DataView({ envelope, settings, state, connected, tessMode, onBackup, onRestore, onAppend }: any) {
   const [name, setName] = useState('')
   const [profile, setProfile] = useState<RuleProfile>('A')
-  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Sicherung & Regeln</p><h1>Deine Daten bleiben greifbar.</h1><p className="lead">{tessMode ? 'TESS auf dem Pi ist die zentrale Quelle und sichert jede Nacht nach Google Drive; JSON und CSV kannst du jederzeit zusätzlich herunterladen.' : 'Notfallmodus: Die Drive-Datei ist die Quelle, bis TESS wieder erreichbar ist; JSON und CSV kannst du jederzeit zusätzlich herunterladen.'}</p></div></div><div className="settings-grid">
+  return <div className="settings-section"><p className="lead">{tessMode ? 'TESS auf dem Pi ist die zentrale Quelle und sichert jede Nacht nach Google Drive; JSON und CSV kannst du jederzeit zusätzlich herunterladen.' : 'Notfallmodus: Die Drive-Datei ist die Quelle, bis TESS wieder erreichbar ist; JSON und CSV kannst du jederzeit zusätzlich herunterladen.'}</p><div className="settings-grid">
     <article className="panel settings-card"><h2>Export & Wiederherstellung</h2><p>Vollständiges Ereignisjournal: <b>{envelope.document.events.length} Buchungen</b></p><div className="button-stack"><button className="primary" onClick={() => downloadJson(envelope.document)}>Vollständiges JSON laden</button><button className="secondary" onClick={() => downloadCsvFiles(envelope.document)}>Drei CSV-Dateien laden</button>{tessMode ? <p className="muted">Wiederherstellen geht im TESS-Modus nur auf dem Pi (./tessctl kaffee-import), weil das Journal dort nie überschrieben wird.</p> : <><button className="secondary" onClick={onRestore}>JSON wiederherstellen</button><button className="secondary" disabled={!connected} onClick={onBackup}>Manuelle Drive-Sicherung</button></>}</div></article>
     <article className="panel settings-card"><h2>Eigene Kategorie</h2><p>Eigene Bezeichnungen nutzen weiterhin ein klar festgelegtes Regelprofil.</p><form onSubmit={event => { event.preventDefault(); if (!name.trim()) return; const id = makeId('category'); void onAppend([createEvent('CATEGORY_DEFINED', { category: { id, name: name.trim(), ruleProfile: profile, builtIn: false } }, [id])]); setName('') }}><label>Name<input value={name} onChange={e => setName(e.target.value)} placeholder="z. B. Wettbewerb" /></label><label>Regelprofil<select value={profile} onChange={e => setProfile(e.target.value as RuleProfile)}><option value="A">A · M und S</option><option value="B">B · L und M</option><option value="DIRECT_S">Direkt in S</option><option value="MANUAL">Manuell</option></select></label><button className="primary" type="submit">Kategorie anlegen</button></form><div className="category-tags">{settings.categories.map((cat: any) => <span key={cat.id}>{cat.name} · {cat.ruleProfile}</span>)}</div></article>
     <article className="panel settings-card"><h2>Datenprüfung</h2><dl><div><dt>Gläser</dt><dd>{Object.keys(state.jars).length}</dd></div><div><dt>Packungen</dt><dd>{Object.keys(state.packages).length}</dd></div><div><dt>Teilchargen</dt><dd>{Object.keys(state.lots).length}</dd></div><div><dt>Ableitungswarnungen</dt><dd>{state.warnings.length}</dd></div></dl>{state.warnings.map((warning: string) => <p className="error-text" key={warning}>{warning}</p>)}</article>
-  </div></section>
+  </div></div>
 }
 
 function AddPackageDialog({ onClose, onSave }: { onClose: () => void; onSave: (events: InventoryEvent[]) => void }) {
@@ -329,9 +292,9 @@ function AddPackageDialog({ onClose, onSave }: { onClose: () => void; onSave: (e
   return <Modal title="Neue Packung" subtitle="Ungeöffnet im Vorrat oder komplett tiefgekühlt" onClose={onClose}><form onSubmit={save} className="form-grid"><label className="span-2">Kaffeename<input autoFocus value={name} onChange={e => setName(e.target.value)} placeholder="z. B. Sterne Espresso" required /></label><label>Nenngewicht in Gramm<input type="number" min="0.1" step="0.1" value={grams} onChange={e => setGrams(Number(e.target.value))} required /></label><label>Lagerort<select value={location} onChange={e => setLocation(e.target.value as CoffeePackage['location'])}><option value="pantry">Vorrat</option><option value="frozen">Komplett tiefgekühlt</option></select></label><DateField label="Röstdatum" value={roast} precision={roastPrecision} onValue={setRoast} onPrecision={setRoastPrecision} /><DateField label="Kaufdatum" value={purchase} precision={purchasePrecision} onValue={setPurchase} onPrecision={setPurchasePrecision} /><div className="modal-actions span-2"><button type="button" className="secondary" onClick={onClose}>Abbrechen</button><button className="primary" type="submit">Packung speichern</button></div></form></Modal>
 }
 
-function AllocateDialog({ state, settings, onClose, onSave }: { state: ReturnType<typeof reduceInventory>; settings: ReturnType<typeof effectiveSettings>; onClose: () => void; onSave: (events: InventoryEvent[]) => void }) {
+function AllocateDialog({ state, settings, initialPackageId, onClose, onSave }: { state: ReturnType<typeof reduceInventory>; settings: ReturnType<typeof effectiveSettings>; initialPackageId?: string; onClose: () => void; onSave: (events: InventoryEvent[]) => void }) {
   const unopened = Object.values(state.packages).filter(pkg => !pkg.archived && pkg.availableGrams > 0)
-  const [packageId, setPackageId] = useState(unopened[0]?.id || '')
+  const [packageId, setPackageId] = useState(unopened.find(item => item.id === initialPackageId)?.id || unopened[0]?.id || '')
   const pkg = state.packages[packageId]
   const [actual, setActual] = useState(pkg?.actualGrams || pkg?.nominalGrams || 0)
   const [amount, setAmount] = useState(pkg?.availableGrams || 0)
@@ -378,57 +341,6 @@ function AllocateDialog({ state, settings, onClose, onSave }: { state: ReturnTyp
   </Modal>
 }
 
-function JarDetail({ jar, state, settings, events, onClose, onAppend }: { jar: JarState; state: ReturnType<typeof reduceInventory>; settings: any; events: InventoryEvent[]; onClose: () => void; onAppend: (events: InventoryEvent[]) => void }) {
-  const lot = jar.lotId ? state.lots[jar.lotId] : undefined
-  const pkg = lot ? state.packages[lot.packageId] : undefined
-  const [grams, setGrams] = useState(lot ? lot.baseGrams + lot.allowanceGrams : 0)
-  const related = events.filter(event => event.resourceIds.includes(jar.id)).sort((a, b) => b.effectiveAt.localeCompare(a.effectiveAt))
-  const clean = () => onAppend([createEvent('JAR_CLEANED', { jarId: jar.id }, [jar.id])])
-  const open = () => onAppend([createEvent('JAR_OPENED', { jarId: jar.id, openedAt: new Date().toISOString() }, [jar.id, jar.lotId!])])
-  const consume = (amount = grams) => { if (amount > 0 && amount <= jar.grams + 0.001) onAppend([createEvent('CONSUMED', { jarId: jar.id, grams: amount }, [jar.id, jar.lotId!])]) }
-  return <div className="drawer-backdrop" onMouseDown={e => e.target === e.currentTarget && onClose()}><aside className="drawer"><button className="drawer-close" onClick={onClose}>×</button><div className={`drawer-jar ${jar.status}`}><span>{jar.id}</span></div><p className="eyebrow">{jar.size}-Glas · {statusLabel[jar.status]}</p><h2>{lot?.name || 'Leeres Glas'}</h2>{lot && <><p className="lead">{jar.grams.toLocaleString('de-DE')} g · {lot.brewMethod === 'espresso' ? 'Espresso' : 'Filter'} · {formatPortions(jar.grams, lot.baseGrams + lot.allowanceGrams)}</p><dl className="detail-list"><div><dt>Ursprung</dt><dd>{pkg?.name}</dd></div><div><dt>Eingefroren</dt><dd>{jar.filledAt ? new Date(jar.filledAt).toLocaleString('de-DE') : '—'}</dd></div><div><dt>Auftauen</dt><dd>{jar.thawCount}</dd></div><div><dt>Wiedereinfrieren</dt><dd>{jar.refreezeCount}</dd></div></dl></>}
-    <div className="drawer-actions">{jar.status === 'frozen' && <button className="primary" onClick={open}>Glas öffnen</button>}{jar.status === 'frozen' && jar.size === 'S' && <button className="secondary" onClick={() => consume(jar.grams)}>Öffnen & vollständig verbrauchen</button>}{jar.status === 'active' && <><label>Verbrauch in Gramm<input type="number" min="0.1" step="0.1" max={jar.grams} value={grams} onChange={e => setGrams(Number(e.target.value))} /></label><button className="primary" onClick={() => consume()}>Verbrauch buchen</button><button className="secondary" onClick={() => consume(jar.grams)}>Rest vollständig verbrauchen</button></>}{jar.status === 'cleaning' && <button className="primary" onClick={clean}>Als gereinigt markieren</button>} {lot && (jar.size === 'L' || (jar.size === 'M' && lot.ruleProfile === 'A')) && ['frozen', 'active'].includes(jar.status) && <TransferAction jar={jar} lot={lot} state={state} onAppend={onAppend} />}</div>
-    <div className="drawer-history"><h3>Glasverlauf</h3>{related.map(event => <div key={event.id}><time>{new Date(event.effectiveAt).toLocaleDateString('de-DE')}</time><span>{event.type}</span></div>)}</div></aside></div>
-}
-
-function TransferAction({ jar, lot, state, onAppend }: { jar: JarState; lot: CoffeeLot; state: ReturnType<typeof reduceInventory>; onAppend: (events: InventoryEvent[]) => void }) {
-  const [draft, setDraft] = useState<Array<{ jarId: string; grams: number; frozen: boolean }>>()
-  const [consumeFirst, setConsumeFirst] = useState(true)
-  const [reason, setReason] = useState('')
-  const portion = round(lot.baseGrams + lot.allowanceGrams)
-  const create = () => {
-    const targetSize: JarSize = jar.size === 'L' ? 'M' : 'S'
-    const consumed = jar.size === 'M' && consumeFirst ? Math.min(portion, jar.grams) : 0
-    let remaining = round(jar.grams - consumed)
-    const cap = round(portionCapacity(targetSize, lot.brewMethod) * portion)
-    const targets: Array<{ jarId: string; grams: number; frozen: boolean }> = []
-    const used = new Set<string>()
-    while (remaining > 0.001) {
-      const free = Object.values(state.jars).filter(j => j.size === targetSize && j.status === 'free' && !used.has(j.id)).sort((a, b) => a.id.localeCompare(b.id))[0]
-      if (!free) break
-      const grams = Math.min(cap, remaining); used.add(free.id); targets.push({ jarId: free.id, grams, frozen: !(jar.size === 'L' && targets.length === 0) }); remaining = round(remaining - grams)
-      if (jar.size === 'L' && targets.length === 3) break
-    }
-    setDraft(targets)
-  }
-  const commit = () => {
-    if (!draft) return
-    const consumed = jar.size === 'M' && consumeFirst ? Math.min(portion, jar.grams) : 0
-    const moved = draft.reduce((sum, target) => sum + target.grams, 0)
-    const remainder = round(jar.grams - consumed - moved)
-    const warnings: string[] = []
-    if (remainder > 0.001) warnings.push(`${remainder} g bleiben im aktiven Ausgangsglas, weil Zielgläser fehlen.`)
-    if (jar.refreezeCount >= 1 && draft.some(target => target.frozen)) warnings.push('Diese Buchung erzeugt eine weitere Wiedereinfrierung.')
-    if (warnings.length && !reason.trim()) return
-    const actionEvents: InventoryEvent[] = []
-    if (jar.status === 'frozen') actionEvents.push(createEvent('JAR_OPENED', { jarId: jar.id, openedAt: new Date().toISOString() }, [jar.id, lot.id]))
-    actionEvents.push(createEvent('TRANSFER_COMMITTED', { sourceJarId: jar.id, targets: draft, consumedGrams: consumed }, [jar.id, lot.id, ...draft.map(t => t.jarId)], { reason: reason.trim() || undefined, warnings }))
-    if (warnings.length) actionEvents.push(createEvent('RULE_OVERRIDE', { kind: 'transfer-exception', sourceJarId: jar.id }, [jar.id, lot.id], { reason: reason.trim(), warnings }))
-    onAppend(actionEvents); setDraft(undefined)
-  }
-  return <div className="transfer-box"><h3>{jar.size === 'L' ? 'In M-Gläser umfüllen' : 'In S-Gläser umfüllen'}</h3>{jar.size === 'M' && <label className="check-row"><input type="checkbox" checked={consumeFirst} onChange={e => setConsumeFirst(e.target.checked)} /> Eine Portion sofort verbrauchen</label>}{!draft ? <button className="secondary" onClick={create}>Umfüllvorschlag</button> : <><div className="transfer-targets">{draft.map(target => <span key={target.jarId}>{target.jarId} · {target.grams.toLocaleString('de-DE')} g · {target.frozen ? 'tiefgekühlt' : 'aktiv'}</span>)}</div>{(round(jar.grams - (jar.size === 'M' && consumeFirst ? Math.min(portion, jar.grams) : 0) - draft.reduce((s, t) => s + t.grams, 0)) > 0.001 || (jar.refreezeCount >= 1 && draft.some(t => t.frozen))) && <label>Pflichtbegründung<input value={reason} onChange={e => setReason(e.target.value)} placeholder="Warum wird von der Regel abgewichen?" /></label>}<button className="primary" onClick={commit}>Umfüllung buchen</button></>}</div>
-}
-
 function RestoreDialog({ onClose, onRestore }: { onClose: () => void; onRestore: (doc: ReturnType<typeof validateDocument>) => void }) {
   const [doc, setDoc] = useState<ReturnType<typeof validateDocument>>()
   const [error, setError] = useState('')
@@ -442,7 +354,12 @@ function DateField({ label, value, precision, onValue, onPrecision }: { label: s
 }
 
 function Modal({ title, subtitle, onClose, wide, children }: { title: string; subtitle: string; onClose: () => void; wide?: boolean; children: React.ReactNode }) {
-  return <div className="modal-backdrop" onMouseDown={e => e.target === e.currentTarget && onClose()}><section className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby="modal-title"><button className="modal-close" onClick={onClose}>×</button><div className="modal-head"><p className="eyebrow">Buchung vorbereiten</p><h2 id="modal-title">{title}</h2><p>{subtitle}</p></div>{children}</section></div>
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+  return <div className="modal-backdrop" onMouseDown={e => e.target === e.currentTarget && onClose()}><section className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby="modal-title"><button className="modal-close" onClick={onClose} aria-label="Schließen">×</button><div className="modal-head"><p className="eyebrow">Buchung vorbereiten</p><h2 id="modal-title">{title}</h2><p>{subtitle}</p></div>{children}</section></div>
 }
 
 function TessSetup({ serverUrl, canCancel, drivePending, onCancel, onDrive, onDone }: { serverUrl: string; canCancel: boolean; drivePending: number; onCancel: () => void; onDrive: () => void; onDone: () => void }) {
@@ -481,7 +398,7 @@ function ConnectionPanel({ mode, serverUrl, signedIn, lastSync, pending, rejecte
   onLogin: () => void; onLogout: () => void; onAddPasskey: () => void; onDismiss: () => void; onSwitch: (mode: Mode) => void
 }) {
   const labels: Record<string, string> = { CONSUMED: 'Verbrauch', JAR_OPENED: 'Glas geöffnet', JAR_CLEANED: 'Glas gereinigt', TRANSFER_COMMITTED: 'Umfüllen', ALLOCATION_COMMITTED: 'Gläser befüllt', PACKAGE_CREATED: 'Packung angelegt', CORRECTION: 'Gegenbuchung' }
-  return <section className="page connection-page"><article className="panel settings-card connection-card">
+  return <div className="settings-section"><article className="panel settings-card connection-card">
     <h2>Verbindung</h2>
     {mode === 'tess' ? <>
       <dl><div><dt>Quelle</dt><dd>TESS (Pi)</dd></div><div><dt>Server</dt><dd>{serverUrl}</dd></div><div><dt>Anmeldung</dt><dd>{signedIn ? 'mit Passkey angemeldet' : 'nicht angemeldet'}</dd></div><div><dt>Ausstehend</dt><dd>{pending}</dd></div><div><dt>Zuletzt synchronisiert</dt><dd>{lastSync || 'noch nie'}</dd></div></dl>
@@ -491,5 +408,5 @@ function ConnectionPanel({ mode, serverUrl, signedIn, lastSync, pending, rejecte
       <div className="notice warning"><b>Notfallmodus Google Drive</b><span>Buchungen landen in der Drive-Datei. Der Pi übernimmt sie bei der nächsten nächtlichen Sicherung; nur nutzen, solange TESS nicht erreichbar ist.</span></div>
       <div className="button-stack"><button className="primary" onClick={() => serverUrl ? onSwitch('tess') : onAddPasskey()}>Zurück zu TESS</button></div>
     </>}
-  </article></section>
+  </article></div>
 }
