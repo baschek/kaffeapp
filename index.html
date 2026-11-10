@@ -13,7 +13,7 @@
       try {
         var l = JSON.parse(localStorage.getItem('kaffee-bestand.look.v1') || 'null') || {}, d = document.documentElement
         d.classList.add('pal-' + (['sand', 'frost', 'schiefer', 'mono'].indexOf(l.palette) >= 0 ? l.palette : 'sand'),
-          l.mode === 'dark' || (l.mode !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light')
+          l.mode === 'dark' ? 'dark' : 'light')
       } catch (e) {}
     </script>
   </head>

@@ -1,7 +1,6 @@
 package de.baschek.kaffee.data
 
 import android.content.Context
-import android.content.res.Configuration
 import de.baschek.kaffee.ui.theme.Appearance
 import de.baschek.kaffee.ui.theme.PaletteId
 import de.baschek.kaffee.ui.theme.ThemeMode
@@ -16,7 +15,6 @@ import kotlinx.coroutines.flow.asStateFlow
  */
 class AppearanceStore(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("appearance", Context.MODE_PRIVATE)
-    private val systemDark = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
     private val _state = MutableStateFlow(read())
 
     val state: StateFlow<Appearance> = _state.asStateFlow()
@@ -30,7 +28,7 @@ class AppearanceStore(context: Context) {
     private fun read() = Appearance(
         palette = prefs.getString(KEY_PALETTE, null).toEnum(PaletteId.SAND),
         tileStyle = prefs.getString(KEY_TILES, null).toEnum(TileStyle.RUHIG),
-        mode = prefs.getString(KEY_MODE, null).toEnum(if (systemDark) ThemeMode.DARK else ThemeMode.LIGHT),
+        mode = prefs.getString(KEY_MODE, null).toEnum(ThemeMode.LIGHT),
     )
 
     private inline fun <reified E : Enum<E>> String?.toEnum(default: E): E =

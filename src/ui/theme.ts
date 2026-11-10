@@ -18,8 +18,7 @@ export const TILE_STYLES: Array<{ id: TileStyle; label: string; hint: string }> 
 ]
 
 const KEY = 'kaffee-bestand.look.v1'
-const systemMode = (): Appearance => typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
-const defaults = (): Look => ({ palette: 'sand', tileStyle: 'ruhig', mode: systemMode() })
+const defaults = (): Look => ({ palette: 'sand', tileStyle: 'ruhig', mode: 'light' })
 
 function read(): Look {
   const base = defaults()
