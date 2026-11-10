@@ -3,6 +3,7 @@ package de.baschek.kaffee
 import android.app.Application
 import androidx.room.Room
 import de.baschek.kaffee.core.api.createHttpClient
+import de.baschek.kaffee.data.AppearanceStore
 import de.baschek.kaffee.data.DeviceKeys
 import de.baschek.kaffee.data.KaffeeRepository
 import de.baschek.kaffee.data.SecureStore
@@ -22,6 +23,7 @@ class AppContainer(app: Application) {
     val scheduler = SyncScheduler(app)
     val repository = KaffeeRepository(database.dao(), appScope) { scheduler.requestSync() }
     val secureStore = SecureStore(app)
+    val appearance = AppearanceStore(app)
     private val httpClient = createHttpClient(OkHttp.create())
     val syncManager = SyncManager(app, repository, secureStore, httpClient, DeviceKeys())
     val updater = AppUpdater(app, httpClient)
