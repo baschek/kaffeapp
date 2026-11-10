@@ -14,27 +14,36 @@ function openDb(): Promise<IDBDatabase> {
   })
 }
 
-export async function loadLocal(): Promise<LocalEnvelope> {
+// Ein Datensatz je Schlüssel: 'inventory' = Drive-Modus (Notfall), 'tess' = TESS-Modus. Beide Journale bleiben getrennt.
+export async function loadRecord<T>(key: string): Promise<T | undefined> {
   const db = await openDb()
-  const result = await new Promise<LocalEnvelope | undefined>((resolve, reject) => {
+  const result = await new Promise<T | undefined>((resolve, reject) => {
     const tx = db.transaction(STORE, 'readonly')
-    const request = tx.objectStore(STORE).get(KEY)
-    request.onsuccess = () => resolve(request.result as LocalEnvelope | undefined)
+    const request = tx.objectStore(STORE).get(key)
+    request.onsuccess = () => resolve(request.result as T | undefined)
     request.onerror = () => reject(request.error)
   })
   db.close()
-  return result || { document: createEmptyDocument(), pendingEventIds: [], pendingReplacement: false, lastRemoteEventIds: [] }
+  return result
 }
 
-export async function saveLocal(envelope: LocalEnvelope): Promise<void> {
+export async function saveRecord<T>(key: string, value: T): Promise<void> {
   const db = await openDb()
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(STORE, 'readwrite')
-    tx.objectStore(STORE).put(envelope, KEY)
+    tx.objectStore(STORE).put(value, key)
     tx.oncomplete = () => resolve()
     tx.onerror = () => reject(tx.error)
   })
   db.close()
+}
+
+export async function loadLocal(): Promise<LocalEnvelope> {
+  return (await loadRecord<LocalEnvelope>(KEY)) || { document: createEmptyDocument(), pendingEventIds: [], pendingReplacement: false, lastRemoteEventIds: [] }
+}
+
+export async function saveLocal(envelope: LocalEnvelope): Promise<void> {
+  await saveRecord(KEY, envelope)
 }
 
 export function validateDocument(value: unknown): InventoryDocument {

@@ -6,6 +6,8 @@ import { reduceInventory, round } from './domain/reducer'
 import { downloadCsvFiles, downloadJson } from './exporter'
 import { validateDocument } from './storage/local'
 import { InventoryRepository } from './storage/repository'
+import { readMode, SessionExpiredError, TessRepository, writeMode, type Mode, type RejectedNotice, type TessEnvelope } from './storage/tess'
+import { passkeysSupported } from './storage/webauthn'
 import type {
   AllocationPlan, BeanState, BrewMethod, CoffeeLot, CoffeePackage, FlexibleDate, InventoryEvent,
   JarSize, JarState, LocalEnvelope, RuleProfile,
@@ -21,6 +23,8 @@ declare global {
 
 type View = 'dashboard' | 'jars' | 'coffee' | 'history' | 'settings'
 const repository = new InventoryRepository()
+const tessRepository = new TessRepository()
+const initialMode = (): Mode | null => readMode() ?? (tessRepository.serverUrl ? 'tess' : null)
 const statusLabel: Record<JarState['status'], string> = { free: 'Frei', planned: 'Geplant', frozen: 'Tiefgekühlt', active: 'Aktiv', cleaning: 'Zu reinigen' }
 
 export default function App() {
@@ -33,8 +37,30 @@ export default function App() {
   const [message, setMessage] = useState('Lokaler Stand wird geladen …')
   const [syncing, setSyncing] = useState(false)
   const [conflictIds, setConflictIds] = useState<string[]>([])
+  const [mode, setMode] = useState<Mode | null>(initialMode)
+  const [signedIn, setSignedIn] = useState(tessRepository.signedIn)
+  const [setupOpen, setSetupOpen] = useState(false)
+  const tessMode = mode === 'tess'
 
-  useEffect(() => { repository.load().then(value => { setEnvelope(value); setMessage(value.pendingEventIds.length ? 'Änderungen warten auf Synchronisierung' : 'Lokal gespeichert') }) }, [])
+  useEffect(() => {
+    let cancelled = false
+    setEnvelope(null)
+    const loading = tessMode ? tessRepository.load() : repository.load()
+    loading.then(value => {
+      if (cancelled) return
+      setEnvelope(value)
+      setMessage(value.pendingEventIds.length ? 'Änderungen warten auf Synchronisierung' : 'Lokal gespeichert')
+      if (tessMode && tessRepository.signedIn && navigator.onLine) void syncTess()
+    })
+    return () => { cancelled = true }
+  }, [mode])
+
+  useEffect(() => {
+    if (!tessMode) return
+    const onFocus = () => { if (tessRepository.signedIn && navigator.onLine) void syncTess() }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [mode])
   const state = useMemo(() => envelope ? reduceInventory(envelope.document) : null, [envelope])
   const settings = useMemo(() => envelope ? effectiveSettings(envelope.document) : null, [envelope])
 
@@ -65,8 +91,40 @@ export default function App() {
     return () => lifecycle.abort()
   }, [state, envelope?.pendingEventIds.length])
 
+  const syncTess = async () => {
+    setSyncing(true); setMessage('Synchronisiere mit TESS …')
+    try {
+      const result = await tessRepository.sync()
+      setEnvelope(result.envelope)
+      setMessage(result.rejected.length ? `Buchung abgelehnt: ${result.rejected.map(item => item.reason).join(' · ')}` : 'Mit TESS synchronisiert')
+    } catch (error) {
+      if (error instanceof SessionExpiredError) setSignedIn(false)
+      setMessage(error instanceof Error ? error.message : 'Synchronisierung fehlgeschlagen')
+    } finally { setSyncing(false) }
+  }
+
+  const loginTess = async () => {
+    setSyncing(true); setMessage('Anmeldung mit Passkey …')
+    try {
+      await tessRepository.login(); setSignedIn(true)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Anmeldung fehlgeschlagen'); setSyncing(false); return
+    }
+    setSyncing(false); await syncTess()
+  }
+
+  const logoutTess = async () => { await tessRepository.logout(); setSignedIn(false); setMessage('Abgemeldet – Buchungen bleiben lokal, bis du dich wieder anmeldest.') }
+
+  const switchMode = (next: Mode) => { writeMode(next); setConflictIds([]); setSetupOpen(false); setMode(next) }
+
   const append = async (events: InventoryEvent[]) => {
     if (!envelope) return
+    if (tessMode) {
+      const next = await tessRepository.append(events)
+      setEnvelope(next); setMessage(`${next.pendingEventIds.length} Änderung${next.pendingEventIds.length === 1 ? '' : 'en'} wartet/warten auf TESS`)
+      if (tessRepository.signedIn && navigator.onLine) void syncTess()
+      return
+    }
     const next = await repository.append(envelope, events)
     setEnvelope(next); setMessage(`${next.pendingEventIds.length} Änderung${next.pendingEventIds.length === 1 ? '' : 'en'} wartet/warten auf Drive`)
     if (repository.drive.connected && navigator.onLine) void sync(next)
@@ -98,7 +156,18 @@ export default function App() {
     else setMessage(`Glas „${id}“ wurde nicht gefunden.`)
   }
 
+  if (mode === null || setupOpen || (tessMode && !tessRepository.serverUrl)) {
+    return <TessSetup serverUrl={tessRepository.serverUrl} canCancel={mode !== null && Boolean(tessRepository.serverUrl)} drivePending={mode === 'drive' ? envelope?.pendingEventIds.length || 0 : 0}
+      onCancel={() => setSetupOpen(false)} onDrive={() => switchMode('drive')}
+      onDone={() => {
+        setSignedIn(tessRepository.signedIn)
+        if (mode === 'tess') { setSetupOpen(false); if (tessRepository.signedIn) void syncTess() } else switchMode('tess')
+      }} />
+  }
+
   if (!envelope || !state || !settings) return <div className="loading">Kaffee-Bestand wird vorbereitet …</div>
+  const rejected = tessMode ? (envelope as TessEnvelope).rejected || [] : []
+  const lastSync = tessMode && (envelope as TessEnvelope).lastSyncAt ? new Date((envelope as TessEnvelope).lastSyncAt!).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' }) : null
 
   const nav: Array<[View, string, string]> = [
     ['dashboard', 'Übersicht', '⌂'], ['jars', 'Gläser', '▦'], ['coffee', 'Kaffees', '◉'], ['history', 'Verlauf', '↗'], ['settings', 'Daten', '⋯'],
@@ -109,8 +178,8 @@ export default function App() {
       <div className="brand"><span className="brand-mark">K</span><div><strong>Kaffee-Bestand</strong><small>96 Gläser · eine Geschichte</small></div></div>
       <nav>{nav.map(([id, label, icon]) => <button key={id} className={view === id ? 'active' : ''} onClick={() => setView(id)}><span>{icon}</span>{label}</button>)}</nav>
       <div className="side-status">
-        <span className={`sync-dot ${repository.drive.connected ? 'online' : ''}`} />
-        <div><strong>{repository.drive.connected ? 'Drive verbunden' : 'Nur lokal'}</strong><small>{envelope.pendingEventIds.length} ausstehend</small></div>
+        <span className={`sync-dot ${(tessMode ? signedIn : repository.drive.connected) ? 'online' : ''}`} />
+        <div><strong>{tessMode ? (signedIn ? 'TESS verbunden' : 'TESS · nicht angemeldet') : repository.drive.connected ? 'Notfall: Drive verbunden' : 'Notfall: nur lokal'}</strong><small>{envelope.pendingEventIds.length} ausstehend{lastSync ? ` · ${lastSync}` : ''}</small></div>
       </div>
     </aside>
 
@@ -121,12 +190,16 @@ export default function App() {
           <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Glas suchen, z. B. S15" aria-label="Glasnummer suchen" />
           <button type="submit">Suchen</button>
         </form>
-        <button className="sync-button" onClick={repository.drive.connected ? () => sync() : connect} disabled={syncing}>
-          {syncing ? 'Bitte warten …' : repository.drive.connected ? 'Jetzt synchronisieren' : 'Mit Google Drive verbinden'}
-        </button>
+        {tessMode
+          ? <button className="sync-button" onClick={signedIn ? () => syncTess() : loginTess} disabled={syncing}>
+            {syncing ? 'Bitte warten …' : signedIn ? 'Jetzt synchronisieren' : 'Mit Passkey anmelden'}
+          </button>
+          : <button className="sync-button" onClick={repository.drive.connected ? () => sync() : connect} disabled={syncing}>
+            {syncing ? 'Bitte warten …' : repository.drive.connected ? 'Jetzt synchronisieren' : 'Mit Google Drive verbinden'}
+          </button>}
       </header>
 
-      <div className="status-strip" role="status"><span>{message}</span>{!navigator.onLine && <b>Offline</b>}{conflictIds.length > 0 && <button onClick={() => setView('history')}>Konflikte ansehen</button>}</div>
+      <div className="status-strip" role="status"><span>{message}</span>{!navigator.onLine && <b>Offline</b>}{!tessMode && <b>Notfallmodus Google Drive</b>}{conflictIds.length > 0 && <button onClick={() => setView('history')}>Konflikte ansehen</button>}{rejected.length > 0 && <button onClick={() => setView('settings')}>Abgelehnte Buchungen ansehen</button>}</div>
 
       {view === 'dashboard' && <Dashboard state={state} settings={settings} onAdd={() => setDialog('package')} onAllocate={() => setDialog('allocate')} onJar={(id: string) => { setSelectedJar(id); setView('jars') }} onView={setView} />}
       {view === 'jars' && <JarMatrix state={state} selected={selectedJar} onSelect={setSelectedJar} />}
@@ -135,7 +208,13 @@ export default function App() {
         const reason = window.prompt('Warum ist diese Buchung fehlerhaft?')?.trim()
         if (reason) void append([createEvent('CORRECTION', { targetEventId: event.id }, event.resourceIds, { reason, parentEventIds: [event.id] })])
       }} />}
-      {view === 'settings' && <DataView envelope={envelope} settings={settings} state={state} connected={repository.drive.connected} onBackup={async () => {
+      {view === 'settings' && <ConnectionPanel mode={mode} serverUrl={tessRepository.serverUrl} signedIn={signedIn} lastSync={lastSync} pending={envelope.pendingEventIds.length} rejected={rejected}
+        onLogin={loginTess} onLogout={logoutTess} onAddPasskey={() => setSetupOpen(true)} onDismiss={async () => setEnvelope(await tessRepository.dismissRejected())}
+        onSwitch={(next: Mode) => {
+          if (next === 'drive' && !window.confirm('Notfallmodus: Buchungen gehen dann in die Google-Drive-Datei statt zu TESS. Der Pi übernimmt sie bei der nächsten nächtlichen Sicherung. Nur nutzen, wenn der Pi nicht erreichbar ist. Wechseln?')) return
+          switchMode(next)
+        }} />}
+      {view === 'settings' && <DataView envelope={envelope} settings={settings} state={state} connected={repository.drive.connected} tessMode={tessMode} onBackup={async () => {
         try { await repository.manualBackup(envelope); setMessage('Manuelle Sicherung in Google Drive erstellt') } catch (error) { setMessage(error instanceof Error ? error.message : 'Sicherung fehlgeschlagen') }
       }} onRestore={() => setDialog('restore')} onAppend={append} />}
     </main>
@@ -221,11 +300,11 @@ function HistoryView({ events, corrected, conflicts, onCorrect }: { events: Inve
   return <section className="page"><div className="page-heading"><div><p className="eyebrow">Unveränderliches Journal</p><h1>Vollständiger Verlauf</h1><p className="lead">Fehler verschwinden nicht: Eine Gegenbuchung hebt ihre Bestandswirkung nachvollziehbar auf.</p></div></div><article className="panel timeline">{[...events].sort((a, b) => b.effectiveAt.localeCompare(a.effectiveAt)).map(event => <div className={`timeline-row ${corrected.has(event.id) ? 'corrected' : ''} ${conflicts.includes(event.id) ? 'conflict' : ''}`} key={event.id}><div className="timeline-mark" /><div><div className="timeline-title"><strong>{labels[event.type] || event.type}</strong><time>{new Date(event.effectiveAt).toLocaleString('de-DE')}</time></div><p>{event.resourceIds.join(' · ') || 'Bestand'}{event.reason ? ` — ${event.reason}` : ''}</p>{event.warnings?.map(w => <span className="event-warning" key={w}>{w}</span>)}<small>{event.id}</small></div>{event.type !== 'CORRECTION' && !corrected.has(event.id) && <button className="icon-button" onClick={() => onCorrect(event)}>Fehler buchen</button>}</div>)}{events.length === 0 && <Empty title="Noch keine Ereignisse" text="Die erste erfasste Packung beginnt dein Journal." />}</article></section>
 }
 
-function DataView({ envelope, settings, state, connected, onBackup, onRestore, onAppend }: any) {
+function DataView({ envelope, settings, state, connected, tessMode, onBackup, onRestore, onAppend }: any) {
   const [name, setName] = useState('')
   const [profile, setProfile] = useState<RuleProfile>('A')
-  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Sicherung & Regeln</p><h1>Deine Daten bleiben greifbar.</h1><p className="lead">Die Drive-Datei ist die zentrale Quelle; JSON und CSV kannst du jederzeit zusätzlich herunterladen.</p></div></div><div className="settings-grid">
-    <article className="panel settings-card"><h2>Export & Wiederherstellung</h2><p>Vollständiges Ereignisjournal: <b>{envelope.document.events.length} Buchungen</b></p><div className="button-stack"><button className="primary" onClick={() => downloadJson(envelope.document)}>Vollständiges JSON laden</button><button className="secondary" onClick={() => downloadCsvFiles(envelope.document)}>Drei CSV-Dateien laden</button><button className="secondary" onClick={onRestore}>JSON wiederherstellen</button><button className="secondary" disabled={!connected} onClick={onBackup}>Manuelle Drive-Sicherung</button></div></article>
+  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Sicherung & Regeln</p><h1>Deine Daten bleiben greifbar.</h1><p className="lead">{tessMode ? 'TESS auf dem Pi ist die zentrale Quelle und sichert jede Nacht nach Google Drive; JSON und CSV kannst du jederzeit zusätzlich herunterladen.' : 'Notfallmodus: Die Drive-Datei ist die Quelle, bis TESS wieder erreichbar ist; JSON und CSV kannst du jederzeit zusätzlich herunterladen.'}</p></div></div><div className="settings-grid">
+    <article className="panel settings-card"><h2>Export & Wiederherstellung</h2><p>Vollständiges Ereignisjournal: <b>{envelope.document.events.length} Buchungen</b></p><div className="button-stack"><button className="primary" onClick={() => downloadJson(envelope.document)}>Vollständiges JSON laden</button><button className="secondary" onClick={() => downloadCsvFiles(envelope.document)}>Drei CSV-Dateien laden</button>{tessMode ? <p className="muted">Wiederherstellen geht im TESS-Modus nur auf dem Pi (./tessctl kaffee-import), weil das Journal dort nie überschrieben wird.</p> : <><button className="secondary" onClick={onRestore}>JSON wiederherstellen</button><button className="secondary" disabled={!connected} onClick={onBackup}>Manuelle Drive-Sicherung</button></>}</div></article>
     <article className="panel settings-card"><h2>Eigene Kategorie</h2><p>Eigene Bezeichnungen nutzen weiterhin ein klar festgelegtes Regelprofil.</p><form onSubmit={event => { event.preventDefault(); if (!name.trim()) return; const id = makeId('category'); void onAppend([createEvent('CATEGORY_DEFINED', { category: { id, name: name.trim(), ruleProfile: profile, builtIn: false } }, [id])]); setName('') }}><label>Name<input value={name} onChange={e => setName(e.target.value)} placeholder="z. B. Wettbewerb" /></label><label>Regelprofil<select value={profile} onChange={e => setProfile(e.target.value as RuleProfile)}><option value="A">A · M und S</option><option value="B">B · L und M</option><option value="DIRECT_S">Direkt in S</option><option value="MANUAL">Manuell</option></select></label><button className="primary" type="submit">Kategorie anlegen</button></form><div className="category-tags">{settings.categories.map((cat: any) => <span key={cat.id}>{cat.name} · {cat.ruleProfile}</span>)}</div></article>
     <article className="panel settings-card"><h2>Datenprüfung</h2><dl><div><dt>Gläser</dt><dd>{Object.keys(state.jars).length}</dd></div><div><dt>Packungen</dt><dd>{Object.keys(state.packages).length}</dd></div><div><dt>Teilchargen</dt><dd>{Object.keys(state.lots).length}</dd></div><div><dt>Ableitungswarnungen</dt><dd>{state.warnings.length}</dd></div></dl>{state.warnings.map((warning: string) => <p className="error-text" key={warning}>{warning}</p>)}</article>
   </div></section>
@@ -364,4 +443,53 @@ function DateField({ label, value, precision, onValue, onPrecision }: { label: s
 
 function Modal({ title, subtitle, onClose, wide, children }: { title: string; subtitle: string; onClose: () => void; wide?: boolean; children: React.ReactNode }) {
   return <div className="modal-backdrop" onMouseDown={e => e.target === e.currentTarget && onClose()}><section className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby="modal-title"><button className="modal-close" onClick={onClose}>×</button><div className="modal-head"><p className="eyebrow">Buchung vorbereiten</p><h2 id="modal-title">{title}</h2><p>{subtitle}</p></div>{children}</section></div>
+}
+
+function TessSetup({ serverUrl, canCancel, drivePending, onCancel, onDrive, onDone }: { serverUrl: string; canCancel: boolean; drivePending: number; onCancel: () => void; onDrive: () => void; onDone: () => void }) {
+  const [url, setUrl] = useState(serverUrl)
+  const [code, setCode] = useState('')
+  const [label, setLabel] = useState(navigator.userAgent.includes('Mobile') ? 'Handy' : 'Laptop')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const supported = passkeysSupported()
+  const run = async (action: () => Promise<unknown>) => {
+    setBusy(true); setError('')
+    try { tessRepository.setServer(url); await action(); onDone() } catch (e) { setError(e instanceof Error ? e.message : 'Unbekannter Fehler') } finally { setBusy(false) }
+  }
+  return <div className="setup-shell"><section className="panel setup-card">
+    <div className="brand setup-brand"><span className="brand-mark">K</span><div><strong>Kaffee-Bestand</strong><small>mit TESS verbinden</small></div></div>
+    <h1>Mit TESS verbinden</h1>
+    <p className="lead">Dein Bestand liegt auf dem Pi. Diese Website meldet sich mit einem Passkey an (Fingerabdruck oder Gesichtserkennung); ein neues Gerät braucht einmalig einen Code vom Pi.</p>
+    {!supported && <p className="error-text">Dieser Browser unterstützt keine Passkeys.</p>}
+    <form className="setup-form" onSubmit={event => { event.preventDefault(); void run(() => tessRepository.registerPasskey(code, label).then(() => tessRepository.login())) }}>
+      <label>Server-Adresse<input value={url} onChange={e => setUrl(e.target.value)} placeholder="https://tess.<name>.ts.net" inputMode="url" autoComplete="url" required /></label>
+      <label>Einmal-Code<input value={code} onChange={e => setCode(e.target.value)} placeholder="aus ./tessctl kaffee-passkey-code" autoComplete="one-time-code" /></label>
+      <label>Name des Passkeys<input value={label} onChange={e => setLabel(e.target.value)} maxLength={40} /></label>
+      <div className="button-stack">
+        <button className="primary" type="submit" disabled={busy || !supported || !code.trim()}>Passkey anlegen und anmelden</button>
+        <button className="secondary" type="button" disabled={busy || !supported || !url.trim()} onClick={() => void run(() => tessRepository.login())}>Ich habe schon einen Passkey: anmelden</button>
+        {canCancel && <button className="text-button" type="button" onClick={onCancel}>Abbrechen</button>}
+      </div>
+    </form>
+    {error && <p className="error-text">{error}</p>}
+    <div className="notice warning"><b>Notfall: Google Drive (wenn der Pi nicht erreichbar ist)</b><span>Bucht in die Drive-Datei wie die alte App. Der Pi übernimmt diese Buchungen bei der nächsten nächtlichen Sicherung; danach wieder hierher zurückwechseln.</span>{drivePending > 0 && <span>Im Notfallmodus warten noch {drivePending} Buchungen auf Drive – dort zuerst synchronisieren.</span>}<button className="secondary" type="button" onClick={onDrive}>Notfallmodus öffnen</button></div>
+  </section></div>
+}
+
+function ConnectionPanel({ mode, serverUrl, signedIn, lastSync, pending, rejected, onLogin, onLogout, onAddPasskey, onDismiss, onSwitch }: {
+  mode: Mode | null; serverUrl: string; signedIn: boolean; lastSync: string | null; pending: number; rejected: RejectedNotice[]
+  onLogin: () => void; onLogout: () => void; onAddPasskey: () => void; onDismiss: () => void; onSwitch: (mode: Mode) => void
+}) {
+  const labels: Record<string, string> = { CONSUMED: 'Verbrauch', JAR_OPENED: 'Glas geöffnet', JAR_CLEANED: 'Glas gereinigt', TRANSFER_COMMITTED: 'Umfüllen', ALLOCATION_COMMITTED: 'Gläser befüllt', PACKAGE_CREATED: 'Packung angelegt', CORRECTION: 'Gegenbuchung' }
+  return <section className="page connection-page"><article className="panel settings-card connection-card">
+    <h2>Verbindung</h2>
+    {mode === 'tess' ? <>
+      <dl><div><dt>Quelle</dt><dd>TESS (Pi)</dd></div><div><dt>Server</dt><dd>{serverUrl}</dd></div><div><dt>Anmeldung</dt><dd>{signedIn ? 'mit Passkey angemeldet' : 'nicht angemeldet'}</dd></div><div><dt>Ausstehend</dt><dd>{pending}</dd></div><div><dt>Zuletzt synchronisiert</dt><dd>{lastSync || 'noch nie'}</dd></div></dl>
+      <div className="button-stack">{signedIn ? <button className="secondary" onClick={onLogout}>Abmelden</button> : <button className="primary" onClick={onLogin}>Mit Passkey anmelden</button>}<button className="secondary" onClick={onAddPasskey}>Passkey hinzufügen oder Server ändern</button><button className="secondary" onClick={() => onSwitch('drive')}>Notfall: Google Drive (wenn der Pi nicht erreichbar ist)</button></div>
+      {rejected.length > 0 && <div className="notice warning"><b>Abgelehnte Buchungen</b>{rejected.map(item => <span key={item.eventId}>Buchung abgelehnt ({labels[item.type] || item.type}, {new Date(item.at).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })}): {item.reason}</span>)}<button className="text-button" onClick={onDismiss}>Hinweise ausblenden</button></div>}
+    </> : <>
+      <div className="notice warning"><b>Notfallmodus Google Drive</b><span>Buchungen landen in der Drive-Datei. Der Pi übernimmt sie bei der nächsten nächtlichen Sicherung; nur nutzen, solange TESS nicht erreichbar ist.</span></div>
+      <div className="button-stack"><button className="primary" onClick={() => serverUrl ? onSwitch('tess') : onAddPasskey()}>Zurück zu TESS</button></div>
+    </>}
+  </article></section>
 }

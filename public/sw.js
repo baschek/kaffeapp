@@ -1,4 +1,4 @@
-const CACHE = 'kaffee-bestand-v1'
+const CACHE = 'kaffee-bestand-v2'
 const APP_SHELL = ['./', './index.html', './manifest.webmanifest', './favicon.svg']
 
 self.addEventListener('install', event => {
@@ -13,6 +13,9 @@ self.addEventListener('activate', event => {
 
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return
+  // Nur die eigene App-Hülle cachen: nie TESS (/kaffee/v1, Sitzungs-Token), Google Drive oder andere fremde Adressen.
+  const url = new URL(event.request.url)
+  if (url.origin !== self.location.origin || url.pathname.includes('/kaffee/v1/')) return
   event.respondWith(
     fetch(event.request)
       .then(response => {

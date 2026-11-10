@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Launcher and window colors; the Compose colors live in ui/theme/KaffeeTheme.kt. -->
+    <color name="ic_launcher_background">#211710</color>
+    <color name="kaffee_background">#EEE9E1</color>
+</resources>
