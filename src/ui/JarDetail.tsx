@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { createEvent } from '../domain/events'
-import { portionCapacity } from '../domain/defaults'
 import { formatPortions } from '../domain/planner'
 import { round } from '../domain/reducer'
+import { maxKeepPortions, transferDraft, type TransferDraft } from '../domain/transfer'
 import type { CoffeeLot, InventoryEvent, InventoryState, JarSize, JarState } from '../types'
 import { EVENT_LABEL, methodWord } from './common'
 import { StatusBadge, STATUS_WORD, fmtGrams } from './JarTile'
@@ -74,46 +74,43 @@ export function JarDetail({ jar, state, events, onClose, onAppend }: { jar: JarS
 }
 
 function TransferAction({ jar, lot, state, onAppend }: { jar: JarState; lot: CoffeeLot; state: InventoryState; onAppend: Append }) {
-  const [draft, setDraft] = useState<Array<{ jarId: string; grams: number; frozen: boolean }>>()
+  const [draft, setDraft] = useState<TransferDraft>()
   const [consumeFirst, setConsumeFirst] = useState(true)
+  const [keep, setKeep] = useState(0)
   const [reason, setReason] = useState('')
   const portion = round(lot.baseGrams + lot.allowanceGrams)
-  const create = () => {
-    const targetSize: JarSize = jar.size === 'L' ? 'M' : 'S'
-    const consumed = jar.size === 'M' && consumeFirst ? Math.min(portion, jar.grams) : 0
-    let remaining = round(jar.grams - consumed)
-    const cap = round(portionCapacity(targetSize, lot.brewMethod) * portion)
-    const targets: Array<{ jarId: string; grams: number; frozen: boolean }> = []
-    const used = new Set<string>()
-    while (remaining > 0.001) {
-      const free = Object.values(state.jars).filter(j => j.size === targetSize && j.status === 'free' && !used.has(j.id)).sort((a, b) => a.id.localeCompare(b.id))[0]
-      if (!free) break
-      const grams = Math.min(cap, remaining); used.add(free.id); targets.push({ jarId: free.id, grams, frozen: !(jar.size === 'L' && targets.length === 0) }); remaining = round(remaining - grams)
-      if (jar.size === 'L' && targets.length === 3) break
-    }
-    setDraft(targets)
-  }
+  const maxKeep = maxKeepPortions(state, jar.id, consumeFirst)
+  const keepNow = Math.min(keep, maxKeep)
+  const changeKeep = (value: number) => { setKeep(Math.max(0, Math.min(maxKeep, value))); setDraft(undefined) }
+  const create = () => setDraft(transferDraft(state, jar.id, consumeFirst, keepNow))
   const commit = () => {
-    if (!draft) return
-    const consumed = jar.size === 'M' && consumeFirst ? Math.min(portion, jar.grams) : 0
-    const moved = draft.reduce((sum, target) => sum + target.grams, 0)
-    const remainder = round(jar.grams - consumed - moved)
-    const warnings: string[] = []
-    if (remainder > 0.001) warnings.push(`${remainder} g bleiben im aktiven Ausgangsglas, weil Zielgläser fehlen.`)
-    if (jar.refreezeCount >= 1 && draft.some(target => target.frozen)) warnings.push('Diese Buchung erzeugt eine weitere Wiedereinfrierung.')
+    if (!draft || !draft.targets.length) return
+    const { targets, consumed, kept, warnings } = draft
     if (warnings.length && !reason.trim()) return
     const actionEvents: InventoryEvent[] = []
     if (jar.status === 'frozen') actionEvents.push(createEvent('JAR_OPENED', { jarId: jar.id, openedAt: new Date().toISOString() }, [jar.id, lot.id]))
-    actionEvents.push(createEvent('TRANSFER_COMMITTED', { sourceJarId: jar.id, targets: draft, consumedGrams: consumed }, [jar.id, lot.id, ...draft.map(t => t.jarId)], { reason: reason.trim() || undefined, warnings }))
+    actionEvents.push(createEvent('TRANSFER_COMMITTED', { sourceJarId: jar.id, targets, consumedGrams: consumed }, [jar.id, lot.id, ...targets.map(t => t.jarId)], { reason: reason.trim() || undefined, warnings }))
     if (warnings.length) actionEvents.push(createEvent('RULE_OVERRIDE', { kind: 'transfer-exception', sourceJarId: jar.id }, [jar.id, lot.id], { reason: reason.trim(), warnings }))
-    onAppend(actionEvents, `${jar.id} umgefüllt`); setDraft(undefined)
+    onAppend(actionEvents, kept > 0 ? `${jar.id} teilweise umgefüllt, ${fmtGrams(kept)} bleiben im Glas` : `${jar.id} umgefüllt`); setDraft(undefined)
   }
-  const needsReason = draft && (round(jar.grams - (jar.size === 'M' && consumeFirst ? Math.min(portion, jar.grams) : 0) - draft.reduce((s, t) => s + t.grams, 0)) > 0.001 || (jar.refreezeCount >= 1 && draft.some(t => t.frozen)))
+  const needsReason = Boolean(draft?.warnings.length)
   return <div className="transfer-box"><h3>{jar.size === 'L' ? 'In M-Gläser umfüllen' : 'In S-Gläser umfüllen'}</h3>
-    {jar.size === 'M' && <label className="check-row"><input type="checkbox" checked={consumeFirst} onChange={e => setConsumeFirst(e.target.checked)} /> Eine Portion sofort verbrauchen</label>}
+    {jar.size === 'M' && <label className="check-row"><input type="checkbox" checked={consumeFirst} onChange={e => { setConsumeFirst(e.target.checked); setDraft(undefined) }} /> Eine Portion sofort verbrauchen</label>}
+    {maxKeep > 0 && <>
+      <p className="hint" id="keep-label">Im Glas behalten (Portionen à {fmtGrams(portion)})</p>
+      <div className="stepper" role="group" aria-labelledby="keep-label">
+        <button className="secondary" aria-label="Eine Portion weniger behalten" disabled={keepNow <= 0} onClick={() => changeKeep(keepNow - 1)}>−</button>
+        <span className="amount keep-count" aria-live="polite">{keepNow === 0 ? 'keine, alles umfüllen' : `${keepNow} ${keepNow === 1 ? 'Portion' : 'Portionen'}`}</span>
+        <button className="secondary" aria-label="Eine Portion mehr behalten" disabled={keepNow >= maxKeep} onClick={() => changeKeep(keepNow + 1)}>+</button>
+      </div></>}
     {!draft ? <button className="secondary" onClick={create}>Umfüllvorschlag</button> : <>
-      <div className="transfer-targets">{draft.map(target => <span key={target.jarId}>{target.jarId} · {target.grams.toLocaleString('de-DE')} g · {target.frozen ? 'tiefgekühlt' : 'aktiv'}</span>)}</div>
+      <div className="transfer-targets">
+        {draft.targets.map(target => <span key={target.jarId}>{target.jarId} · {target.grams.toLocaleString('de-DE')} g · {target.frozen ? 'tiefgekühlt' : 'aktiv'}</span>)}
+        {draft.kept > 0 && <span>{jar.id} · {draft.kept.toLocaleString('de-DE')} g bleiben im Glas · aktiv</span>}
+        {!draft.targets.length && <span>Keine freien {jar.size === 'L' ? 'M' : 'S'}-Gläser.</span>}
+        {draft.warnings.map(warning => <span key={warning} className="warning-text">{warning}</span>)}
+      </div>
       {needsReason && <label>Pflichtbegründung<input value={reason} onChange={e => setReason(e.target.value)} placeholder="Warum wird von der Regel abgewichen?" /></label>}
-      <button className="primary" onClick={commit}>Umfüllung buchen</button></>}
+      <button className="primary" disabled={!draft.targets.length || (needsReason && !reason.trim())} onClick={commit}>Umfüllung buchen</button></>}
   </div>
 }

@@ -49,6 +49,7 @@ import de.baschek.kaffee.core.domain.formatPortions
 import de.baschek.kaffee.core.domain.germanNumber
 import de.baschek.kaffee.core.domain.jsRound
 import de.baschek.kaffee.core.domain.objs
+import de.baschek.kaffee.core.domain.maxKeepPortions
 import de.baschek.kaffee.core.domain.transferDraft
 import de.baschek.kaffee.data.Inventory
 import de.baschek.kaffee.ui.theme.Kaffee
@@ -274,7 +275,7 @@ fun JarDetailSheet(inv: Inventory, jarId: String, onClose: () -> Unit, onBook: (
         if (status == "free") Text("Dieses Glas ist frei. Es wird beim Aufteilen einer Packung befüllt.", style = Kaffee.type.body, color = c.inkMuted)
         if (lot != null && (size == "L" || (size == "M" && lot["ruleProfile"] == "A")) && status in setOf("frozen", "active")) {
             if (!transfer) SecondaryButton("Umfüllen") { transfer = true }
-            else TransferBox(inv, jar, { events -> onBook(events, "$jarId umgefüllt") }) { error = it }
+            else TransferBox(inv, jar, { events, label -> onBook(events, label) }) { error = it }
         }
         Text("Glasverlauf", style = Kaffee.type.title, color = c.ink, modifier = Modifier.padding(top = 10.dp))
         inv.document.objs("events").filter { jarId in (it["resourceIds"] as List<*>) }.sortedByDescending { it["effectiveAt"] as String }.forEach { event ->
@@ -287,24 +288,39 @@ fun JarDetailSheet(inv: Inventory, jarId: String, onClose: () -> Unit, onBook: (
 }
 
 @Composable
-private fun TransferBox(inv: Inventory, jar: Obj, onAppend: (List<Obj>) -> Unit, onError: (String?) -> Unit) {
+private fun TransferBox(inv: Inventory, jar: Obj, onAppend: (List<Obj>, String) -> Unit, onError: (String?) -> Unit) {
     val jarId = jar["id"] as String
     val c = Kaffee.colors
     var consumeFirst by remember(jarId) { mutableStateOf(true) }
+    var keep by remember(jarId) { mutableStateOf(0) }
     var draft by remember(jarId) { mutableStateOf<TransferDraft?>(null) }
     var reason by remember(jarId) { mutableStateOf("") }
+    val maxKeep = maxKeepPortions(inv.state, jarId, consumeFirst)
+    val keepNow = keep.coerceAtMost(maxKeep)
+    val portionGrams = inv.state.lot(jar["lotId"] as String)?.let { portion(it) } ?: 0.0
     val shape = RoundedCornerShape(Kaffee.spacing.radiusMd)
     Column(Modifier.fillMaxWidth().clip(shape).background(c.surface200).border(1.dp, c.line, shape).padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(if (jar["size"] == "L") "In M-Gläser umfüllen" else "In S-Gläser umfüllen", style = Kaffee.type.bodyStrong, color = c.ink)
         if (jar["size"] == "M") CheckRow("Eine Portion sofort verbrauchen", consumeFirst) { consumeFirst = it; draft = null }
+        if (maxKeep > 0) {
+            Text("Im Glas behalten (Portionen à ${grams(portionGrams)})", style = Kaffee.type.small, color = c.inkMuted)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SecondaryButton("−", Modifier.width(56.dp).heightIn(min = 56.dp), enabled = keepNow > 0) { keep = keepNow - 1; draft = null }
+                Text(if (keepNow == 0) "keine, alles umfüllen" else "$keepNow ${if (keepNow == 1) "Portion" else "Portionen"}",
+                    style = Kaffee.type.bodyStrong, color = c.ink, textAlign = TextAlign.Center, modifier = Modifier.weight(1f))
+                SecondaryButton("+", Modifier.width(56.dp).heightIn(min = 56.dp), enabled = keepNow < maxKeep) { keep = keepNow + 1; draft = null }
+            }
+        }
         val current = draft
-        if (current == null) SecondaryButton("Umfüllvorschlag") { draft = transferDraft(inv.state, jarId, consumeFirst) }
+        if (current == null) SecondaryButton("Umfüllvorschlag") { draft = transferDraft(inv.state, jarId, consumeFirst, keepNow) }
         else {
             current.targets.forEach { Text("${it.jarId} · ${grams(it.grams)} · ${if (it.frozen) "tiefgekühlt" else "aktiv"}", style = Kaffee.type.small, color = c.ink) }
+            if (current.kept > 0) Text("$jarId · ${grams(current.kept)} bleiben im Glas · aktiv", style = Kaffee.type.small, color = c.ink)
             current.warnings.forEach { Text(it, style = Kaffee.type.small, color = c.activeFg) }
             if (current.warnings.isNotEmpty()) TextInput("Pflichtbegründung", reason, placeholder = "Warum wird von der Regel abgewichen?") { reason = it }
             PrimaryButton("Umfüllung buchen") {
-                try { onAppend(Actions.transfer(inv.state, jarId, current, reason)); draft = null } catch (e: DomainError) { onError(e.message) }
+                val label = if (current.kept > 0) "$jarId teilweise umgefüllt, ${grams(current.kept)} bleiben im Glas" else "$jarId umgefüllt"
+                try { onAppend(Actions.transfer(inv.state, jarId, current, reason), label); draft = null } catch (e: DomainError) { onError(e.message) }
             }
         }
     }

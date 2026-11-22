@@ -327,18 +327,40 @@ fun formatPortions(grams: Double, portionGrams: Double): String {
 /** toLocaleString('de-DE') for the small gram values used in the UI. */
 fun germanNumber(value: Double): String = jsNum(jsRound(value)).replace('.', ',')
 
-// --- TransferAction (App.tsx) ---
+// --- Umfüllvorschlag (src/domain/transfer.ts) ---
 
 data class TransferTarget(val jarId: String, val grams: Double, val frozen: Boolean)
-data class TransferDraft(val targets: List<TransferTarget>, val consumed: Double, val warnings: List<String>)
+/** [kept]: Gramm, die bei einer Teilumfüllung bewusst im Ausgangsglas bleiben (nicht Teil der Golden-Fälle). */
+data class TransferDraft(val targets: List<TransferTarget>, val consumed: Double, val warnings: List<String>, val kept: Double = 0.0)
 
-fun transferDraft(state: InventoryState, jarId: String, consumeFirst: Boolean): TransferDraft {
+private fun transferPortion(state: InventoryState, jar: Obj): Double {
+    val lot = state.lot(jar["lotId"] as String)!!
+    return jsRound(lot.d("baseGrams") + lot.d("allowanceGrams"))
+}
+
+private fun transferConsumed(state: InventoryState, jar: Obj, consumeFirst: Boolean): Double =
+    if (jar["size"] == "M" && consumeFirst) minOf(transferPortion(state, jar), jar.d("grams")) else 0.0
+
+/** Höchstzahl ganzer Portionen, die im Ausgangsglas bleiben können; mindestens eine Portion wird immer umgefüllt. */
+fun maxKeepPortions(state: InventoryState, jarId: String, consumeFirst: Boolean): Int {
+    val jar = state.jar(jarId)!!
+    val remaining = jsRound(jar.d("grams") - transferConsumed(state, jar, consumeFirst))
+    return maxOf(0, floor((remaining + 1e-9) / transferPortion(state, jar)).toInt() - 1)
+}
+
+/**
+ * Mit [keepPortions] bleiben so viele ganze Portionen im Ausgangsglas (Teilumfüllung); das Ausgangsglas bleibt aktiv,
+ * alle Zielgläser werden eingefroren. Ohne [keepPortions] exakt der bisherige Vorschlag (Golden-Fälle, TESS).
+ */
+fun transferDraft(state: InventoryState, jarId: String, consumeFirst: Boolean, keepPortions: Int = 0): TransferDraft {
     val jar = state.jar(jarId)!!
     val lot = state.lot(jar["lotId"] as String)!!
-    val portion = jsRound(lot.d("baseGrams") + lot.d("allowanceGrams"))
+    val portion = transferPortion(state, jar)
     val targetSize = if (jar["size"] == "L") "M" else "S"
-    val consumed = if (jar["size"] == "M" && consumeFirst) minOf(portion, jar.d("grams")) else 0.0
-    var remaining = jsRound(jar.d("grams") - consumed)
+    val consumed = transferConsumed(state, jar, consumeFirst)
+    val keep = keepPortions.coerceIn(0, maxKeepPortions(state, jarId, consumeFirst))
+    val kept = jsRound(keep * portion)
+    var remaining = jsRound(jar.d("grams") - consumed - kept)
     val cap = jsRound(portionCapacity(targetSize, lot.s("brewMethod")) * portion)
     val targets = mutableListOf<TransferTarget>()
     val used = mutableSetOf<String>()
@@ -347,16 +369,16 @@ fun transferDraft(state: InventoryState, jarId: String, consumeFirst: Boolean): 
             .minByOrNull { it.s("id") } ?: break
         val grams = minOf(cap, remaining)
         used += free.s("id")
-        targets += TransferTarget(free.s("id"), grams, !(jar["size"] == "L" && targets.isEmpty()))
+        targets += TransferTarget(free.s("id"), grams, !(jar["size"] == "L" && targets.isEmpty() && keep == 0))
         remaining = jsRound(remaining - grams)
         if (jar["size"] == "L" && targets.size == 3) break
     }
     val moved = targets.sumOf { it.grams }
-    val remainder = jsRound(jar.d("grams") - consumed - moved)
+    val remainder = jsRound(jar.d("grams") - consumed - moved - kept)
     val warnings = mutableListOf<String>()
     if (remainder > 0.001) warnings += "${jsNum(remainder)} g bleiben im aktiven Ausgangsglas, weil Zielgläser fehlen."
     if (jar.d("refreezeCount") >= 1 && targets.any { it.frozen }) warnings += "Diese Buchung erzeugt eine weitere Wiedereinfrierung."
-    return TransferDraft(targets, consumed, warnings)
+    return TransferDraft(targets, consumed, warnings, kept)
 }
 
 /** validateDocument() of storage/local.ts plus a check of the payload shape. */

@@ -7,6 +7,7 @@ import de.baschek.kaffee.core.domain.Obj
 import de.baschek.kaffee.core.domain.createEmptyDocument
 import de.baschek.kaffee.core.domain.effectiveSettings
 import de.baschek.kaffee.core.domain.list
+import de.baschek.kaffee.core.domain.maxKeepPortions
 import de.baschek.kaffee.core.domain.reduceInventory
 import de.baschek.kaffee.core.domain.transferDraft
 import kotlin.test.Test
@@ -56,6 +57,27 @@ class ActionsTest {
         val draft = Actions.planSplit(state(), effectiveSettings(document), pkgId, 100.0, 100.0, "espresso", "whole", "premium-whole", "A", 18.0, 0.2, false)
         book(Actions.commitSplit(state(), draft, warningsConfirmed = true))
         assertEquals(1, state().overrides.size)
+        assertEquals(emptyList(), state().warnings)
+    }
+
+    @Test
+    fun partialTransferKeepsPortionsInTheSourceJar() {
+        book(Actions.newPackage("Teil", 250.0, Actions.FlexibleDate(null, "exact"), Actions.FlexibleDate(null, "exact"), "pantry"))
+        val pkgId = state().allPackages().single()["id"] as String
+        val draft = Actions.planSplit(state(), effectiveSettings(document), pkgId, 248.3, 248.3, "filter", "whole", "daily-driver", "A", 15.0, 0.1, false)
+        book(Actions.commitSplit(state(), draft, warningsConfirmed = true))
+        val m = draft.plan.fills.first { it.size == "M" }.jarId
+        val before = state().jar(m)!!["grams"] as Double
+        val max = maxKeepPortions(state(), m, consumeFirst = false)
+        assertTrue(max >= 1)
+        val partial = transferDraft(state(), m, consumeFirst = false, keepPortions = 1)
+        assertEquals(15.1, partial.kept)
+        assertTrue(partial.targets.all { it.frozen })
+        assertEquals(emptyList(), partial.warnings)
+        book(Actions.transfer(state(), m, partial, ""))
+        assertEquals("active", state().jar(m)!!["status"])
+        assertEquals(15.1, state().jar(m)!!["grams"])
+        assertEquals(before, 15.1 + partial.targets.sumOf { it.grams }, 0.001)
         assertEquals(emptyList(), state().warnings)
     }
 }

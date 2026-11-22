@@ -4,10 +4,11 @@
 // Die TypeScript-Logik in src/domain ist die Referenz; die Fälle sind synthetisch (keine echten Daten).
 import { writeFileSync } from 'node:fs'
 import { it } from 'vitest'
-import { createEmptyDocument, effectiveSettings, portionCapacity } from '../domain/defaults'
+import { createEmptyDocument, effectiveSettings } from '../domain/defaults'
 import { planAllocation } from '../domain/planner'
+import { transferDraft as domainTransferDraft } from '../domain/transfer'
 import { reduceInventory, round } from '../domain/reducer'
-import type { BrewMethod, CoffeeLot, CoffeePackage, InventoryDocument, InventoryEvent, InventoryState, JarSize, RuleProfile } from '../types'
+import type { BrewMethod, CoffeeLot, CoffeePackage, InventoryDocument, InventoryEvent, InventoryState, RuleProfile } from '../types'
 
 let seed = 1
 const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 }
@@ -68,28 +69,10 @@ function allocate(doc: InventoryDocument, out: unknown[]) {
   if (pkg.location === 'frozen') doc.events.push(ev('RULE_OVERRIDE', { kind: 'frozen-package-refreeze', packageId: pkg.id, lotId: lot.id }, [pkg.id, lot.id], { reason: 'Zuvor komplett eingefrorene Packung wurde portioniert und wieder eingefroren.' }))
 }
 
-// Nachbau von TransferAction (App.tsx): Vorschlag und Buchung.
+// Umfüllvorschlag aus src/domain/transfer.ts (ohne Teilumfüllung); "kept" gehört nicht zum gemeinsamen Golden-Format.
 export function transferDraft(state: InventoryState, jarId: string, consumeFirst: boolean) {
-  const jar = state.jars[jarId]; const lot = state.lots[jar.lotId!]
-  const portion = round(lot.baseGrams + lot.allowanceGrams)
-  const targetSize: JarSize = jar.size === 'L' ? 'M' : 'S'
-  const consumed = jar.size === 'M' && consumeFirst ? Math.min(portion, jar.grams) : 0
-  let remaining = round(jar.grams - consumed)
-  const cap = round(portionCapacity(targetSize, lot.brewMethod) * portion)
-  const targets: Array<{ jarId: string; grams: number; frozen: boolean }> = []
-  const used = new Set<string>()
-  while (remaining > 0.001) {
-    const free = Object.values(state.jars).filter(j => j.size === targetSize && j.status === 'free' && !used.has(j.id)).sort((a, b) => a.id.localeCompare(b.id))[0]
-    if (!free) break
-    const grams = Math.min(cap, remaining); used.add(free.id); targets.push({ jarId: free.id, grams, frozen: !(jar.size === 'L' && targets.length === 0) }); remaining = round(remaining - grams)
-    if (jar.size === 'L' && targets.length === 3) break
-  }
-  const moved = targets.reduce((sum, t) => sum + t.grams, 0)
-  const remainder = round(jar.grams - consumed - moved)
-  const warnings: string[] = []
-  if (remainder > 0.001) warnings.push(`${remainder} g bleiben im aktiven Ausgangsglas, weil Zielgläser fehlen.`)
-  if (jar.refreezeCount >= 1 && targets.some(t => t.frozen)) warnings.push('Diese Buchung erzeugt eine weitere Wiedereinfrierung.')
-  return { targets, consumed, warnings }
+  const { kept: _kept, ...draft } = domainTransferDraft(state, jarId, consumeFirst)
+  return draft
 }
 
 function janitor(doc: InventoryDocument, transfers: unknown[]) {
