@@ -448,6 +448,8 @@ input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--brand); 
 .transfer-box { background: var(--surface-200); border: 1px solid var(--line); padding: 14px; border-radius: var(--radius-md); display: grid; gap: 8px; }
 .transfer-box h3 { font-size: 14px; margin: 0; }
 .transfer-targets { display: grid; gap: 4px; font-size: 12px; }
+.transfer-targets .warning-text { color: var(--status-active-fg); }
+.stepper .keep-count { display: flex !important; align-items: center; justify-content: center; min-height: 52px; font: 700 16px var(--font-display); color: var(--ink); text-align: center; }
 .check-row { display: flex !important; flex-direction: row !important; align-items: center; gap: 8px !important; font-weight: 500 !important; }
 
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
